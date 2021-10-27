@@ -73,6 +73,17 @@ type Config struct {
 	ConnTimeout time.Duration // Use context for timeouts.
 	KeepAlive   time.Duration // Leave at default.
 	PacketSize  uint16
+
+	// LoginOptions allows to pass option flags to the server during login.
+	LoginOptions LoginOptions
+}
+
+// LoginOptions combines option flags and other login options.
+type LoginOptions struct {
+	OptionFlags1 uint8
+	OptionFlags2 uint8
+	TypeFlags    uint8
+	OptionFlags3 uint8
 }
 
 func SetupTLS(certificate string, insecureSkipVerify bool, hostInCertificate string) (*tls.Config, error) {

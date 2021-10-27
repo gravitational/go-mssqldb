@@ -143,6 +143,7 @@ type tdsSession struct {
 	logger       ContextLogger
 	routedServer string
 	routedPort   uint16
+	loginFlags   []Token
 }
 
 const (
@@ -168,9 +169,22 @@ func (p keySlice) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
 
 // http://msdn.microsoft.com/en-us/library/dd357559.aspx
 func writePrelogin(packetType packetType, w *tdsBuffer, fields map[uint8][]byte) error {
-	var err error
-
 	w.BeginPacket(packetType, false)
+	if err := WritePreLoginFields(w, fields); err != nil {
+		return err
+	}
+	return w.FinishPacket()
+}
+
+// Writer is an interface that combines Writer and ByteWriter.
+type Writer interface {
+	io.Writer
+	io.ByteWriter
+}
+
+// WritePreLoginFields writes provided Pre-Login packet fields into the writer.
+func WritePreLoginFields(w Writer, fields map[uint8][]byte) error {
+	var err error
 	offset := uint16(5*len(fields) + 1)
 	keys := make(keySlice, 0, len(fields))
 	for k := range fields {
@@ -210,7 +224,7 @@ func writePrelogin(packetType packetType, w *tdsBuffer, fields map[uint8][]byte)
 			return errors.New("Write method didn't write the whole value")
 		}
 	}
-	return w.FinishPacket()
+	return nil
 }
 
 func readPrelogin(r *tdsBuffer) (map[uint8][]byte, error) {
@@ -479,6 +493,11 @@ func ucs22str(s []byte) (string, error) {
 	return string(utf16.Decode(buf)), nil
 }
 
+// ParseUCS2String returns string from its UCS-2 encoded representation.
+func ParseUCS2String(s []byte) (string, error) {
+	return ucs22str(s)
+}
+
 func manglePassword(password string) []byte {
 	var ucs2password []byte = str2ucs2(password)
 	for i, ch := range ucs2password {
@@ -527,6 +546,7 @@ func sendLogin(w *tdsBuffer, login *login) error {
 		AtchDBFileLength:     uint16(utf8.RuneCountInString(login.AtchDBFile)),
 		ChangePasswordLength: uint16(utf8.RuneCountInString(login.ChangePassword)),
 	}
+
 	offset := uint16(binary.Size(hdr))
 	hdr.HostNameOffset = offset
 	offset += uint16(len(hostname))
@@ -987,12 +1007,12 @@ func prepareLogin(ctx context.Context, c *Connector, p msdsn.Config, logger Cont
 		TDSVersion:   verTDS74,
 		PacketSize:   packetSize,
 		Database:     p.Database,
-		OptionFlags2: fODBC, // to get unlimited TEXTSIZE
-		OptionFlags1: fUseDB | fSetLang,
 		HostName:     p.Workstation,
 		ServerName:   serverName,
 		AppName:      p.AppName,
-		TypeFlags:    typeFlags,
+		OptionFlags1: p.LoginOptions.OptionFlags1 | fUseDB | fSetLang,
+		OptionFlags2: p.LoginOptions.OptionFlags2 | fODBC, // to get unlimited TEXTSIZE,
+		TypeFlags:    p.LoginOptions.TypeFlags | typeFlags,
 	}
 	switch {
 	case fe.FedAuthLibrary == FedAuthLibrarySecurityToken:
@@ -1173,11 +1193,17 @@ initiate_connection:
 		}
 	}
 
-	auth, authOk := getAuth(p.User, p.Password, p.ServerSPN, p.Workstation)
-	if authOk {
-		defer auth.Free()
+	var auth auth
+	if c.auth != nil {
+		auth = c.auth
 	} else {
-		auth = nil
+		var authOk bool
+		auth, authOk = getAuth(p.User, p.Password, p.ServerSPN, p.Workstation)
+		if authOk {
+			defer auth.Free()
+		} else {
+			auth = nil
+		}
 	}
 
 	login, err := prepareLogin(ctx, c, p, logger, auth, fedAuth, uint32(outbuf.PackageSize()))
@@ -1206,6 +1232,15 @@ initiate_connection:
 
 			if tok == nil {
 				break
+			}
+
+			// Save options returned by the server so callers implementing
+			// proxies can pass them back to the original client.
+			switch tok.(type) {
+			case envChangeStruct, loginAckStruct, doneStruct:
+				if token, ok := tok.(Token); ok {
+					sess.loginFlags = append(sess.loginFlags, token)
+				}
 			}
 
 			switch token := tok.(type) {

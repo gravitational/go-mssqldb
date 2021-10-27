@@ -127,10 +127,11 @@ func NewConnector(dsn string) (*Connector, error) {
 
 // NewConnectorConfig creates a new Connector for a DSN Config struct.
 // The returned connector may be used with sql.OpenDB.
-func NewConnectorConfig(config msdsn.Config) *Connector {
+func NewConnectorConfig(config msdsn.Config, auth auth) *Connector {
 	return &Connector{
 		params: config,
 		driver: driverInstanceNoProcess,
+		auth:   auth,
 	}
 }
 
@@ -152,6 +153,9 @@ type Connector struct {
 
 	// callback that can provide a security token during ADAL login
 	adalTokenProvider func(ctx context.Context, serverSPN, stsURL string) (string, error)
+
+	// auth allows to provide custom authenticator.
+	auth auth
 
 	// SessionInitSQL is executed after marking a given session to be reset.
 	// When not present, the next query will still reset the session to the
@@ -213,6 +217,16 @@ type outputs struct {
 // IsValid satisfies the driver.Validator interface.
 func (c *Conn) IsValid() bool {
 	return c.connectionGood
+}
+
+// GetUnderlyingConn returns underlying raw server connection.
+func (c *Conn) GetUnderlyingConn() io.ReadWriteCloser {
+	return c.sess.buf.transport
+}
+
+// GetLoginFlags returns tokens returned by server during login handshake.
+func (c *Conn) GetLoginFlags() []Token {
+	return c.sess.loginFlags
 }
 
 // checkBadConn marks the connection as bad based on the characteristics

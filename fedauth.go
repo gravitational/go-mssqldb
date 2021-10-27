@@ -46,7 +46,7 @@ func NewSecurityTokenConnector(config msdsn.Config, tokenProvider func(ctx conte
 		return nil, errors.New("mssql: tokenProvider cannot be nil")
 	}
 
-	conn := NewConnectorConfig(config)
+	conn := NewConnectorConfig(config, nil)
 	conn.fedAuthRequired = true
 	conn.fedAuthLibrary = FedAuthLibrarySecurityToken
 	conn.securityTokenProvider = tokenProvider
@@ -68,7 +68,7 @@ func NewActiveDirectoryTokenConnector(config msdsn.Config, adalWorkflow byte, to
 		return nil, errors.New("mssql: tokenProvider cannot be nil")
 	}
 
-	conn := NewConnectorConfig(config)
+	conn := NewConnectorConfig(config, nil)
 	conn.fedAuthRequired = true
 	conn.fedAuthLibrary = FedAuthLibraryADAL
 	conn.fedAuthADALWorkflow = adalWorkflow
