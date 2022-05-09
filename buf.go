@@ -28,6 +28,8 @@ var bufpool = sync.Pool{
 	},
 }
 
+type TDSBuffer = tdsBuffer
+
 // tdsBuffer reads and writes TDS packets of data to the transport.
 // The write and read buffers are separate to make sending attn signals
 // possible without locks. Currently attn signals are only sent during
@@ -57,6 +59,13 @@ type tdsBuffer struct {
 	// before the first use. It is executed after the first packet is
 	// written and then removed.
 	afterFirst func()
+}
+
+func NewTdsBuffer(buff []byte, size int) *tdsBuffer {
+	return &tdsBuffer{
+		rbuf:  buff,
+		rsize: size,
+	}
 }
 
 func newTdsBuffer(bufsize uint16, transport io.ReadWriteCloser) *tdsBuffer {
