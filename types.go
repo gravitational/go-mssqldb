@@ -123,6 +123,10 @@ type xmlInfo struct {
 	XmlSchemaCollection string
 }
 
+func ReadTypeInfo(r *TDSBuffer, typeId byte, c *cryptoMetadata, encoding msdsn.EncodeParameters) typeInfo {
+	return readTypeInfo(r, typeId, c, encoding)
+}
+
 func readTypeInfo(r *tdsBuffer, typeId byte, c *cryptoMetadata, encoding msdsn.EncodeParameters) (res typeInfo) {
 	res.TypeId = typeId
 	switch typeId {
