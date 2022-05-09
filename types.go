@@ -119,6 +119,10 @@ type xmlInfo struct {
 	XmlSchemaCollection string
 }
 
+func ReadTypeInfo(r *TDSBuffer) typeInfo {
+	return readTypeInfo(r)
+}
+
 func readTypeInfo(r *tdsBuffer) (res typeInfo) {
 	res.TypeId = r.byte()
 	switch res.TypeId {
