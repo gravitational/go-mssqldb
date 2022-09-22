@@ -1,6 +1,10 @@
+//go:build go1.18
+// +build go1.18
+
 package azuread
 
 import (
+	"reflect"
 	"testing"
 
 	mssql "github.com/denisenkom/go-mssqldb"
@@ -88,6 +92,15 @@ func TestValidateParameters(t *testing.T) {
 				fedAuthWorkflow: ActiveDirectoryManagedIdentity,
 			},
 		},
+		{
+			name: "managed identity with resource id",
+			dsn:  "server=someserver.database.windows.net;fedauth=ActiveDirectoryManagedIdentity;resource id=/subscriptions/{guid}/resourceGroups/{resource-group-name}/{resource-provider-namespace}/{resource-type}/{resource-name}",
+			expected: &azureFedAuthConfig{
+				adalWorkflow:    mssql.FedAuthADALWorkflowMSI,
+				resourceID:      "/subscriptions/{guid}/resourceGroups/{resource-group-name}/{resource-provider-namespace}/{resource-type}/{resource-name}",
+				fedAuthWorkflow: ActiveDirectoryManagedIdentity,
+			},
+		},
 	}
 	for _, tst := range tests {
 		config, err := parse(tst.dsn)
@@ -108,9 +121,8 @@ func TestValidateParameters(t *testing.T) {
 		}
 		// mssqlConfig is not idempotent due to pointers in it, plus we aren't testing its correctness here
 		config.mssqlConfig = msdsn.Config{}
-		if *config != *tst.expected {
+		if !reflect.DeepEqual(config, tst.expected) {
 			t.Errorf("Captured parameters do not match in test case '%s'. Expected:%+v, Actual:%+v", tst.name, tst.expected, config)
 		}
 	}
-
 }
