@@ -1,3 +1,6 @@
+//go:build go1.18
+// +build go1.18
+
 package azuread
 
 import (
@@ -50,5 +53,5 @@ func newConnectorConfig(config *azureFedAuthConfig) (*mssql.Connector, error) {
 			},
 		)
 	}
-	return mssql.NewConnectorConfig(config.mssqlConfig), nil
+	return mssql.NewConnectorConfig(config.mssqlConfig, nil), nil
 }
