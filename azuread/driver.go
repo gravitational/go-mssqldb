@@ -9,6 +9,7 @@ import (
 	"database/sql/driver"
 
 	mssql "github.com/microsoft/go-mssqldb"
+	"github.com/microsoft/go-mssqldb/msdsn"
 )
 
 // DriverName is the name used to register the driver
@@ -35,11 +36,19 @@ func (d *Driver) Open(dsn string) (driver.Conn, error) {
 // NewConnector creates a new connector from a DSN.
 // The returned connector may be used with sql.OpenDB.
 func NewConnector(dsn string) (*mssql.Connector, error) {
-
 	config, err := parse(dsn)
 	if err != nil {
 		return nil, err
 	}
+	return newConnectorConfig(config)
+}
+
+func NewConnectorFromConfig(dsnConfig msdsn.Config) (*mssql.Connector, error) {
+	config, err := newConfig(dsnConfig)
+	if err != nil {
+		return nil, err
+	}
+
 	return newConnectorConfig(config)
 }
 
@@ -61,6 +70,6 @@ func newConnectorConfig(config *azureFedAuthConfig) (*mssql.Connector, error) {
 			},
 		)
 	default:
-		return mssql.NewConnectorConfig(config.mssqlConfig), nil
+		return mssql.NewConnectorConfig(config.mssqlConfig, nil), nil
 	}
 }
