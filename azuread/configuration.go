@@ -57,12 +57,18 @@ func parse(dsn string) (*azureFedAuthConfig, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	return newConfig(mssqlConfig, params)
+}
+
+// newConfig returns a config based on an msdsn.Config and a map of parameters.
+func newConfig(dsnConfig msdsn.Config, params map[string]string) (*azureFedAuthConfig, error) {
 	config := &azureFedAuthConfig{
 		fedAuthLibrary: mssql.FedAuthLibraryReserved,
-		mssqlConfig:    mssqlConfig,
+		mssqlConfig:    dsnConfig,
 	}
 
-	err = config.validateParameters(params)
+	err := config.validateParameters(params)
 	if err != nil {
 		return nil, err
 	}

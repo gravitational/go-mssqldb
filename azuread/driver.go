@@ -9,6 +9,7 @@ import (
 	"database/sql/driver"
 
 	mssql "github.com/denisenkom/go-mssqldb"
+	"github.com/denisenkom/go-mssqldb/msdsn"
 )
 
 // DriverName is the name used to register the driver
@@ -35,11 +36,20 @@ func (d *Driver) Open(dsn string) (driver.Conn, error) {
 // NewConnector creates a new connector from a DSN.
 // The returned connector may be used with sql.OpenDB.
 func NewConnector(dsn string) (*mssql.Connector, error) {
-
 	config, err := parse(dsn)
 	if err != nil {
 		return nil, err
 	}
+
+	return newConnectorConfig(config)
+}
+
+func NewConnectorFromConfig(dsnConfig msdsn.Config, params map[string]string) (*mssql.Connector, error) {
+	config, err := newConfig(dsnConfig, params)
+	if err != nil {
+		return nil, err
+	}
+
 	return newConnectorConfig(config)
 }
 
