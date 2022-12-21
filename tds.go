@@ -143,6 +143,7 @@ type tdsSession struct {
 	logger       ContextLogger
 	routedServer string
 	routedPort   uint16
+	loginFlags   []Token
 }
 
 const (
@@ -168,9 +169,23 @@ func (p keySlice) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
 
 // http://msdn.microsoft.com/en-us/library/dd357559.aspx
 func writePrelogin(packetType packetType, w *tdsBuffer, fields map[uint8][]byte) error {
+	w.BeginPacket(packetType, false)
+	if err := WritePreLoginFields(w, fields); err != nil {
+		return err
+	}
+	return w.FinishPacket()
+}
+
+// Writer is an interface that combines Writer and ByteWriter.
+type Writer interface {
+	io.Writer
+	io.ByteWriter
+}
+
+// WritePreLoginFields writes provided Pre-Login packet fields into the writer.
+func WritePreLoginFields(w Writer, fields map[uint8][]byte) error {
 	var err error
 
-	w.BeginPacket(packetType, false)
 	offset := uint16(5*len(fields) + 1)
 	keys := make(keySlice, 0, len(fields))
 	for k := range fields {
@@ -210,7 +225,7 @@ func writePrelogin(packetType packetType, w *tdsBuffer, fields map[uint8][]byte)
 			return errors.New("Write method didn't write the whole value")
 		}
 	}
-	return w.FinishPacket()
+	return nil
 }
 
 func readPrelogin(r *tdsBuffer) (map[uint8][]byte, error) {
@@ -1193,6 +1208,15 @@ initiate_connection:
 
 			if tok == nil {
 				break
+			}
+
+			// Save options returned by the server so callers implementing
+			// proxies can pass them back to the original client.
+			switch tok.(type) {
+			case envChangeStruct, loginAckStruct, doneStruct:
+				if token, ok := tok.(Token); ok {
+					sess.loginFlags = append(sess.loginFlags, token)
+				}
 			}
 
 			switch token := tok.(type) {

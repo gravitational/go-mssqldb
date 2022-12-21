@@ -1,6 +1,7 @@
 package mssql
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -102,8 +103,18 @@ const (
 // interface for all tokens
 type tokenStruct interface{}
 
+// Token represents a token that can be marshaled to wire representation.
+type Token interface {
+	Marshal() ([]byte, error)
+}
+
 type orderStruct struct {
 	ColIds []uint16
+}
+
+// DoneToken returns a Done token.
+func DoneToken() Token {
+	return doneStruct{}
 }
 
 type doneStruct struct {
@@ -111,6 +122,23 @@ type doneStruct struct {
 	CurCmd   uint16
 	RowCount uint64
 	errors   []Error
+}
+
+// Marshal returns the token's wire protocol representation.
+func (d doneStruct) Marshal() ([]byte, error) {
+	buf := bytes.NewBuffer([]byte{
+		byte(tokenDone),
+	})
+	if err := binary.Write(buf, binary.LittleEndian, d.Status); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(buf, binary.LittleEndian, d.CurCmd); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(buf, binary.LittleEndian, d.RowCount); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 func (d doneStruct) isError() bool {
@@ -131,17 +159,35 @@ func (d doneStruct) getError() Error {
 
 type doneInProcStruct doneStruct
 
+type envChangeStruct struct {
+	bytes []byte
+}
+
+// Marshal returns the token's wire protocol representation.
+func (e envChangeStruct) Marshal() ([]byte, error) {
+	return e.bytes, nil
+}
+
 // ENVCHANGE stream
 // http://msdn.microsoft.com/en-us/library/dd303449.aspx
-func processEnvChg(ctx context.Context, sess *tdsSession) {
+func processEnvChg(ctx context.Context, sess *tdsSession) envChangeStruct {
+	buf := bytes.NewBuffer([]byte{
+		byte(tokenEnvChange),
+	})
 	size := sess.buf.uint16()
-	r := &io.LimitedReader{R: sess.buf, N: int64(size)}
+	if err := binary.Write(buf, binary.LittleEndian, size); err != nil {
+		badStreamPanic(err)
+	}
+	// Duplicate the token stream in the buffer.
+	r := io.TeeReader(&io.LimitedReader{R: sess.buf, N: int64(size)}, buf)
 	for {
 		var err error
 		var envtype uint8
 		err = binary.Read(r, binary.LittleEndian, &envtype)
 		if err == io.EOF {
-			return
+			return envChangeStruct{
+				bytes: buf.Bytes(),
+			}
 		}
 		if err != nil {
 			badStreamPanic(err)
@@ -152,8 +198,7 @@ func processEnvChg(ctx context.Context, sess *tdsSession) {
 			if err != nil {
 				badStreamPanic(err)
 			}
-			_, err = readBVarChar(r)
-			if err != nil {
+			if _, err = readBVarChar(r); err != nil {
 				badStreamPanic(err)
 			}
 		case envTypLanguage:
@@ -181,8 +226,7 @@ func processEnvChg(ctx context.Context, sess *tdsSession) {
 			if err != nil {
 				badStreamPanic(err)
 			}
-			_, err = readBVarChar(r)
-			if err != nil {
+			if _, err = readBVarChar(r); err != nil {
 				badStreamPanic(err)
 			}
 			packetsizei, err := strconv.Atoi(packetsize)
@@ -217,7 +261,6 @@ func processEnvChg(ctx context.Context, sess *tdsSession) {
 			if err != nil {
 				badStreamPanic(err)
 			}
-
 			// SQL Collation data should contain 5 bytes in length
 			if collationSize != 5 {
 				badStreamPanicf("Invalid SQL Collation size value returned from server: %d", collationSize)
@@ -229,16 +272,14 @@ func processEnvChg(ctx context.Context, sess *tdsSession) {
 			if err != nil {
 				badStreamPanic(err)
 			}
-
 			// 1 byte, contains: sortID
 			var sortID uint8
 			err = binary.Read(r, binary.LittleEndian, &sortID)
 			if err != nil {
 				badStreamPanic(err)
 			}
-
 			// old value, should be 0
-			if _, err = readBVarChar(r); err != nil {
+			if _, err := readBVarChar(r); err != nil {
 				badStreamPanic(err)
 			}
 		case envTypBeginTran:
@@ -388,7 +429,9 @@ func processEnvChg(ctx context.Context, sess *tdsSession) {
 			if sess.logFlags&logDebug != 0 {
 				sess.logger.Log(ctx, msdsn.LogDebug, fmt.Sprintf("WARN: Unknown ENVCHANGE record detected with type id = %d", envtype))
 			}
-			return
+			return envChangeStruct{
+				bytes: buf.Bytes(),
+			}
 		}
 	}
 }
@@ -797,7 +840,7 @@ func processSingleResponse(ctx context.Context, sess *tdsSession, ch chan tokenS
 			parseNbcRow(sess.buf, columns, row)
 			ch <- row
 		case tokenEnvChange:
-			processEnvChg(ctx, sess)
+			ch <- processEnvChg(ctx, sess)
 		case tokenError:
 			err := parseError72(sess.buf)
 			if sess.logFlags&logDebug != 0 {

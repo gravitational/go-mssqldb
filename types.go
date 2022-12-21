@@ -85,6 +85,8 @@ const (
 	fDefault = 0x200
 )
 
+type TypeInfo = typeInfo
+
 // TYPE_INFO rule
 // http://msdn.microsoft.com/en-us/library/dd358284.aspx
 type typeInfo struct {
@@ -117,6 +119,11 @@ type xmlInfo struct {
 	DBName              string
 	OwningSchema        string
 	XmlSchemaCollection string
+}
+
+// ReadTypeInfo returns an exported version of typeInfo
+func ReadTypeInfo(r *TDSBuffer) TypeInfo {
+	return readTypeInfo(r)
 }
 
 func readTypeInfo(r *tdsBuffer) (res typeInfo) {

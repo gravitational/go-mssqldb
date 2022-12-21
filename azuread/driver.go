@@ -7,8 +7,8 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
-
 	mssql "github.com/microsoft/go-mssqldb"
+	"github.com/microsoft/go-mssqldb/msdsn"
 )
 
 // DriverName is the name used to register the driver
@@ -40,6 +40,16 @@ func NewConnector(dsn string) (*mssql.Connector, error) {
 	if err != nil {
 		return nil, err
 	}
+	return newConnectorConfig(config)
+}
+
+// NewConnectorFromConfig returns a new connector with the provided configuration and additional parameters
+func NewConnectorFromConfig(dsnConfig msdsn.Config, params map[string]string) (*mssql.Connector, error) {
+	config, err := newConfig(dsnConfig, params)
+	if err != nil {
+		return nil, err
+	}
+
 	return newConnectorConfig(config)
 }
 

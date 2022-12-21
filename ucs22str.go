@@ -149,3 +149,8 @@ func ucs22str(s []byte) (string, error) {
 	// After this point both s and uint16slice can be garbage collected.
 	return string(utf16.Decode(uint16slice)), nil
 }
+
+// ParseUCS2String returns string from its UCS-2 encoded representation.
+func ParseUCS2String(s []byte) (string, error) {
+	return ucs22str(s)
+}
