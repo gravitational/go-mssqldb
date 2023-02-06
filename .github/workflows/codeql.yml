@@ -4,11 +4,11 @@ on:
   push:
     branches:
       - master
-      - teleport
+      - teleport.1
   pull_request:
     branches:
       - master
-      - teleport
+      - teleport.1
 
 jobs:
   analyze:
