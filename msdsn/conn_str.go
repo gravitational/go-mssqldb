@@ -79,6 +79,16 @@ type Config struct {
 	Protocols []string
 	// ProtocolParameters are written by non-tcp ProtocolParser implementations
 	ProtocolParameters map[string]interface{}
+	// LoginOptions allows to pass option flags to the server during login.
+	LoginOptions LoginOptions
+}
+
+// LoginOptions combines option flags and other login options.
+type LoginOptions struct {
+	OptionFlags1 uint8
+	OptionFlags2 uint8
+	TypeFlags    uint8
+	OptionFlags3 uint8
 }
 
 func SetupTLS(certificate string, insecureSkipVerify bool, hostInCertificate string, minTLSVersion string) (*tls.Config, error) {

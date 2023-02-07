@@ -17,15 +17,16 @@ import (
 	"unicode"
 
 	"github.com/golang-sql/sqlexp"
+	"github.com/microsoft/go-mssqldb/integratedauth"
 	"github.com/microsoft/go-mssqldb/internal/querytext"
 	"github.com/microsoft/go-mssqldb/msdsn"
 )
 
 // ReturnStatus may be used to return the return value from a proc.
 //
-//   var rs mssql.ReturnStatus
-//   _, err := db.Exec("theproc", &rs)
-//   log.Printf("return status = %d", rs)
+//	var rs mssql.ReturnStatus
+//	_, err := db.Exec("theproc", &rs)
+//	log.Printf("return status = %d", rs)
 type ReturnStatus int32
 
 var driverInstance = &Driver{processQueryText: true}
@@ -143,10 +144,11 @@ func NewConnectorWithAccessTokenProvider(dsn string, tokenProvider func(ctx cont
 
 // NewConnectorConfig creates a new Connector for a DSN Config struct.
 // The returned connector may be used with sql.OpenDB.
-func NewConnectorConfig(config msdsn.Config) *Connector {
+func NewConnectorConfig(config msdsn.Config, auth integratedauth.IntegratedAuthenticator) *Connector {
 	return &Connector{
 		params: config,
 		driver: driverInstanceNoProcess,
+		auth:   auth,
 	}
 }
 
@@ -168,6 +170,9 @@ type Connector struct {
 
 	// callback that can provide a security token during ADAL login
 	adalTokenProvider func(ctx context.Context, serverSPN, stsURL string) (string, error)
+
+	// auth allows to provide custom authenticator.
+	auth integratedauth.IntegratedAuthenticator
 
 	// SessionInitSQL is executed after marking a given session to be reset.
 	// When not present, the next query will still reset the session to the
@@ -229,6 +234,16 @@ type outputs struct {
 // IsValid satisfies the driver.Validator interface.
 func (c *Conn) IsValid() bool {
 	return c.connectionGood
+}
+
+// GetUnderlyingConn returns underlying raw server connection.
+func (c *Conn) GetUnderlyingConn() io.ReadWriteCloser {
+	return c.sess.buf.transport
+}
+
+// GetLoginFlags returns tokens returned by server during login handshake.
+func (c *Conn) GetLoginFlags() []Token {
+	return c.sess.loginFlags
 }
 
 // checkBadConn marks the connection as bad based on the characteristics
@@ -878,12 +893,13 @@ func (r *Rows) ColumnTypeDatabaseTypeName(index int) string {
 // not a variable length type ok should return false.
 // If length is not limited other than system limits, it should return math.MaxInt64.
 // The following are examples of returned values for various types:
-//   TEXT          (math.MaxInt64, true)
-//   varchar(10)   (10, true)
-//   nvarchar(10)  (10, true)
-//   decimal       (0, false)
-//   int           (0, false)
-//   bytea(30)     (30, true)
+//
+//	TEXT          (math.MaxInt64, true)
+//	varchar(10)   (10, true)
+//	nvarchar(10)  (10, true)
+//	decimal       (0, false)
+//	int           (0, false)
+//	bytea(30)     (30, true)
 func (r *Rows) ColumnTypeLength(index int) (int64, bool) {
 	return makeGoLangTypeLength(r.cols[index].ti)
 }
@@ -891,9 +907,10 @@ func (r *Rows) ColumnTypeLength(index int) (int64, bool) {
 // It should return
 // the precision and scale for decimal types. If not applicable, ok should be false.
 // The following are examples of returned values for various types:
-//   decimal(38, 4)    (38, 4, true)
-//   int               (0, 0, false)
-//   decimal           (math.MaxInt64, math.MaxInt64, true)
+//
+//	decimal(38, 4)    (38, 4, true)
+//	int               (0, 0, false)
+//	decimal           (math.MaxInt64, math.MaxInt64, true)
 func (r *Rows) ColumnTypePrecisionScale(index int) (int64, int64, bool) {
 	return makeGoLangTypePrecisionScale(r.cols[index].ti)
 }
@@ -1320,12 +1337,13 @@ func (r *Rowsq) ColumnTypeDatabaseTypeName(index int) string {
 // not a variable length type ok should return false.
 // If length is not limited other than system limits, it should return math.MaxInt64.
 // The following are examples of returned values for various types:
-//   TEXT          (math.MaxInt64, true)
-//   varchar(10)   (10, true)
-//   nvarchar(10)  (10, true)
-//   decimal       (0, false)
-//   int           (0, false)
-//   bytea(30)     (30, true)
+//
+//	TEXT          (math.MaxInt64, true)
+//	varchar(10)   (10, true)
+//	nvarchar(10)  (10, true)
+//	decimal       (0, false)
+//	int           (0, false)
+//	bytea(30)     (30, true)
 func (r *Rowsq) ColumnTypeLength(index int) (int64, bool) {
 	return makeGoLangTypeLength(r.cols[index].ti)
 }
@@ -1333,9 +1351,10 @@ func (r *Rowsq) ColumnTypeLength(index int) (int64, bool) {
 // It should return
 // the precision and scale for decimal types. If not applicable, ok should be false.
 // The following are examples of returned values for various types:
-//   decimal(38, 4)    (38, 4, true)
-//   int               (0, 0, false)
-//   decimal           (math.MaxInt64, math.MaxInt64, true)
+//
+//	decimal(38, 4)    (38, 4, true)
+//	int               (0, 0, false)
+//	decimal           (math.MaxInt64, math.MaxInt64, true)
 func (r *Rowsq) ColumnTypePrecisionScale(index int) (int64, int64, bool) {
 	return makeGoLangTypePrecisionScale(r.cols[index].ti)
 }
