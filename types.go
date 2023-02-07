@@ -673,7 +673,9 @@ func readPLPType(ti *typeInfo, r *tdsBuffer) interface{} {
 		// size unknown
 		buf = bytes.NewBuffer(make([]byte, 0, 1000))
 	default:
-		buf = bytes.NewBuffer(make([]byte, 0, size))
+		// Uses a fixed buffer size to avoid overflow.
+		// Same size as used on `io.Copy` internal buffer: https://github.com/golang/go/blob/release-branch.go1.20/src/io/io.go#L416
+		buf = bytes.NewBuffer(make([]byte, 0, 32*1024))
 	}
 	for {
 		chunksize := r.uint32()
