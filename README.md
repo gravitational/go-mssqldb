@@ -1,14 +1,13 @@
-# A pure Go MSSQL driver for Go's database/sql package
+# Microsoft's official Go MSSQL driver
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/microsoft/go-mssqldb.svg)](https://pkg.go.dev/github.com/microsoft/go-mssqldb)
 [![Build status](https://ci.appveyor.com/api/projects/status/jrln8cs62wj9i0a2?svg=true)](https://ci.appveyor.com/project/microsoft/go-mssqldb)
 [![codecov](https://codecov.io/gh/microsoft/go-mssqldb/branch/master/graph/badge.svg)](https://codecov.io/gh/microsoft/go-mssqldb)
 
-For more recent updates, see the [Microsoft fork](https://github.com/microsoft/go-mssqldb).
 
 ## Install
 
-Requires Go 1.8 or above.
+Requires Go 1.17 or above.
 
 Install with `go install github.com/microsoft/go-mssqldb@latest`.
 
@@ -26,9 +25,10 @@ Other supported formats are listed below.
 * `connection timeout` - in seconds (default is 0 for no timeout), set to 0 for no timeout. Recommended to set to 0 and use context to manage query and connection timeouts.
 * `dial timeout` - in seconds (default is 15 times the number of registered protocols), set to 0 for no timeout.
 * `encrypt`
+  * `strict` - Data sent between client and server is encrypted E2E using [TDS8](https://learn.microsoft.com/en-us/sql/relational-databases/security/networking/tds-8?view=sql-server-ver16).
   * `disable` - Data send between client and server is not encrypted.
-  * `false` - Data sent between client and server is not encrypted beyond the login packet. (Default)
-  * `true` - Data sent between client and server is encrypted.
+  * `false`/`optional`/`no`/`0`/`f` - Data sent between client and server is not encrypted beyond the login packet. (Default)
+  * `true`/`mandatory`/`yes`/`1`/`t` - Data sent between client and server is encrypted.
 * `app name` - The application name (default is go-mssqldb)
 * `authenticator` - Can be used to specify use of a registered authentication provider. (e.g. ntlm, winsspi (on windows) or krb5 (on linux))
 
@@ -57,13 +57,17 @@ Other supported formats are listed below.
 * `TrustServerCertificate`
   * false - Server certificate is checked. Default is false if encrypt is specified.
   * true - Server certificate is not checked. Default is true if encrypt is not specified. If trust server certificate is true, driver accepts any certificate presented by the server and any host name in that certificate. In this mode, TLS is susceptible to man-in-the-middle attacks. This should be used only for testing.
-* `certificate` - The file that contains the public key certificate of the CA that signed the SQL Server certificate. The specified certificate overrides the go platform specific CA certificates.
+* `certificate` - The file that contains the public key certificate of the CA that signed the SQL Server certificate. The specified certificate overrides the go platform specific CA certificates. Currently, certificates of PEM type are supported.
 * `hostNameInCertificate` - Specifies the Common Name (CN) in the server certificate. Default value is the server host.
 * `tlsmin` - Specifies the minimum TLS version for negotiating encryption with the server. Recognized values are `1.0`, `1.1`, `1.2`, `1.3`. If not set to a recognized value the default value for the `tls` package will be used. The default is currently `1.2`. 
 * `ServerSPN` - The kerberos SPN (Service Principal Name) for the server. Default is MSSQLSvc/host:port.
 * `Workstation ID` - The workstation name (default is the host name)
 * `ApplicationIntent` - Can be given the value `ReadOnly` to initiate a read-only connection to an Availability Group listener. The `database` must be specified when connecting with `Application Intent` set to `ReadOnly`.
 * `protocol` - forces use of a protocol. Make sure the corresponding package is imported.
+* `columnencryption` or `column encryption setting` - a boolean value indicating whether Always Encrypted should be enabled on the connection.
+* `multisubnetfailover`
+  * `true` (Default) Client attempt to connect to all IPs simultaneously. 
+  * `false` Client attempts to connect to IPs in serial.
 
 ### Connection parameters for namedpipe package
 * `pipe`  - If set, no Browser query is made and named pipe used will be `\\<host>\pipe\<pipe>`
@@ -72,6 +76,10 @@ Other supported formats are listed below.
 
 If no pipe name can be derived from the DSN, connection attempts will first query the SQL Browser service to find the pipe name for the instance.
 
+### DNS Resolution through a Custom Dialer
+
+Custom Dialers can be used to resolve DNS if the Connection's Dialer implements the `HostDialer` interface. This is helpful when the dialer is proxying requests to a different, private network and the DNS record is local to the private network.
+
 ### Protocol configuration
 
 To force a specific protocol for the connection there two several options:
@@ -79,6 +87,8 @@ To force a specific protocol for the connection there two several options:
 2. Set the `protocol` parameter to the protocol name
 
 `msdsn.ProtocolParsers` can be reordered to prioritize other protocols ahead of `tcp`
+
+The `admin` protocol will not be used for dialing unless the connection string explicitly specifies it. Note SQL Server allows only 1 admin (or DAC) connection to be active at a time.
 
 ### Kerberos Active Directory authentication outside Windows
 
@@ -117,10 +127,10 @@ The package supports authentication via 3 methods.
 ### Kerberos Parameters
 
 * `authenticator` - set this to `krb5` to enable kerberos authentication. If this is not present, the default provider would be `ntlm` for unix and `winsspi` for windows.
-* `krb5-configfile` (mandatory) - path to kerberos configuration file. 
-* `krb5-realm` (required with keytab and raw credentials) - Domain name for kerberos authentication. 
-* `krb5-keytabfile` - path to Keytab file.
-* `krb5-credcachefile` - path to Credential cache.
+* `krb5-configfile` (optional) - path to kerberos configuration file. Defaults to `/etc/krb5.conf`. Can also be set using `KRB5_CONFIG` environment variable.
+* `krb5-realm` (required with keytab and raw credentials) - Domain name for kerberos authentication. Omit this parameter if the realm is part of the user name like `username@REALM`.
+* `krb5-keytabfile` - path to Keytab file. Can also be set using environment variable `KRB5_KTNAME`. If no parameter or environment variable is set, the `DefaultClientKeytabName` value from the krb5 config file is used.
+* `krb5-credcachefile` - path to Credential cache. Can also be set using environment variable `KRBCCNAME`.
 * `krb5-dnslookupkdc` - Optional parameter in all contexts. Set to lookup KDCs in DNS. Boolean. Default is true. 
 * `krb5-udppreferencelimit` - Optional parameter in all contexts. 1 means to always use tcp. MIT krb5 has a default value of 1465, and it prevents user setting more than 32700. Integer. Default is 1.
   
@@ -195,6 +205,16 @@ For further information on usage:
 Azure Active Directory authentication uses temporary authentication tokens to authenticate.
 The `mssql` package does not provide an implementation to obtain tokens: instead, import the `azuread` package and use driver name `azuresql`. This driver uses [azidentity](https://pkg.go.dev/github.com/Azure/azure-sdk-for-go/sdk/azidentity#section-readme) to acquire tokens using a variety of credential types.
 
+To reduce friction in local development, `ActiveDirectoryDefault` can authenticate as the user signed into the Azure CLI.
+
+Run the following command to sign into the Azure CLI before running your application using the `ActiveDirectoryDefault` connection string parameter:
+
+```azurecli
+az login
+```
+
+Azure CLI authentication isn't recommended for applications running in Azure. More details are available via the [Azure authentication with the Azure Identity module for Go](https://learn.microsoft.com/en-us/azure/developer/go/azure-sdk-authentication) tutorial.
+
 The credential type is determined by the new `fedauth` connection string parameter.
 
 * `fedauth=ActiveDirectoryServicePrincipal` or `fedauth=ActiveDirectoryApplication` - authenticates using an Azure Active Directory application client ID and client secret or certificate. Implemented using [ClientSecretCredential or CertificateCredential](https://github.com/Azure/azure-sdk-for-go/tree/main/sdk/azidentity#authenticating-service-principals)
@@ -211,6 +231,8 @@ The credential type is determined by the new `fedauth` connection string paramet
   * `resource id=<resource id>` - optional resource id of user-assigned managed identity.  If empty, system-assigned managed identity or user id are used (if both user id and resource id are provided, resource id will be used)
 * `fedauth=ActiveDirectoryInteractive` - authenticates using credentials acquired from an external web browser. Only suitable for use with human interaction.
   * `applicationclientid=<application id>` - This guid identifies an Azure Active Directory enterprise application that the AAD admin has approved for accessing Azure SQL database resources in the tenant. This driver does not have an associated application id of its own.
+* `fedauth=ActiveDirectoryDeviceCode` - prints a message to stdout giving the user a URL and code to authenticate. Connection continues after user completes the login separately.
+* `fedauth=ActiveDirectoryAzCli` - reuses local authentication the user already performed using Azure CLI.
 
 ```go
 
@@ -372,7 +394,61 @@ db.QueryContext(ctx, `select * from t2 where user_name = @p1;`, mssql.VarChar(na
 // Note: Mismatched data types on table and parameter may cause long running queries
 ```
 
+## Using Always Encrypted
+
+The protocol and cryptography details for AE are [detailed elsewhere](https://learn.microsoft.com/sql/relational-databases/security/encryption/always-encrypted-database-engine?view=sql-server-ver16).
+
+### Enablement
+
+To enable AE on a connection, set the `ColumnEncryption` value to true on a config or pass `columnencryption=true` in the connection string.
+
+Decryption and encryption won't succeed, however, without also including a decryption key provider. To avoid code size impacts on non-AE applications, key providers are not included by default.
+
+Include the local certificate providers:
+
+```go
+ import (
+  "github.com/microsoft/go-mssqldb/aecmk/localcert"
+ )
+ ```
+
+You can also instantiate a key provider directly in code and hand it to a `Connector` instance.
+
+```go
+c := mssql.NewConnectorConfig(myconfig)
+c.RegisterCekProvider(providerName, MyProviderType{})
+```
+
+### Decryption
+
+If the correct key provider is included in your application, decryption of encrypted cells happens automatically with no extra server round trips.
+
+### Encryption
+
+Encryption of parameters passed to `Exec` and `Query` variants requires an extra round trip per query to fetch the encryption metadata. If the error returned by a query attempt indicates a type mismatch between the parameter and the destination table, most likely your input type is not a strict match for the SQL Server data type of the destination. You may be using a Go `string` when you need to use one of the driver-specific aliases like `VarChar` or `NVarCharMax`.
+
+*** NOTE *** - Currently `char` and `varchar` types do not include a collation parameter component so can't be used for inserting encrypted values. 
+https://github.com/microsoft/go-mssqldb/issues/129
+
+
+### Local certificate AE key provider
+
+Key provider configuration is managed separately without any properties in the connection string.
+The `pfx` provider exposes its instance as the variable `PfxKeyProvider`. You can give it passwords for certificates using `SetCertificatePassword(pathToCertificate, path)`. Use an empty string or `"*"` as the path to use the same password for all certificates.
+
+The `MSSQL_CERTIFICATE_STORE` provider exposes its instance as the variable `WindowsCertificateStoreKeyProvider`.
+
+Both providers can be constrained to an allowed list of encryption key paths by appending paths to `provider.AllowedLocations`.
+
+
+### Azure Key Vault (AZURE_KEY_VAULT) key provider
+
+Import this provider using `github.com/microsoft/go-mssqldb/aecmk/akv`
+
+Constrain the provider to an allowed list of key vaults by appending vault host strings like "mykeyvault.vault.azure.net" to `akv.KeyProvider.AllowedLocations`.
+
 ## Important Notes
+
 
 * [LastInsertId](https://golang.org/pkg/database/sql/#Result.LastInsertId) should
     not be used with this driver (or SQL Server) due to how the TDS protocol
@@ -400,9 +476,14 @@ db.QueryContext(ctx, `select * from t2 where user_name = @p1;`, mssql.VarChar(na
 * Supports connections to AlwaysOn Availability Group listeners, including re-direction to read-only replicas.
 * Supports query notifications
 * Supports Kerberos Authentication
+* Supports handling the `uniqueidentifier` data type with the `UniqueIdentifier` and `NullUniqueIdentifier` go types
 * Pluggable Dialer implementations through `msdsn.ProtocolParsers` and `msdsn.ProtocolDialers`
 * A `namedpipe` package to support connections using named pipes (np:) on Windows
 * A `sharedmemory` package to support connections using shared memory (lpc:) on Windows
+* Dedicated Administrator Connection (DAC) is supported using `admin` protocol
+* Always Encrypted
+  - `MSSQL_CERTIFICATE_STORE` provider on Windows
+  - `pfx` provider on Linux and Windows
 
 ## Tests
 
@@ -443,6 +524,7 @@ To fix SQL Server 2008 R2 issue, install SQL Server 2008 R2 Service Pack 2.
 To fix SQL Server 2008 issue, install Microsoft SQL Server 2008 Service Pack 3 and Cumulative update package 3 for SQL Server 2008 SP3.
 More information: <http://support.microsoft.com/kb/2653857>
 
+* Bulk copy does not yet support encrypting column values using Always Encrypted. Tracked in [#127](https://github.com/microsoft/go-mssqldb/issues/127)
 
 # Contributing
 This project is a fork of [https://github.com/denisenkom/go-mssqldb](https://github.com/denisenkom/go-mssqldb) and welcomes new and previous contributors. For more informaton on contributing to this project, please see [Contributing](./CONTRIBUTING.md).

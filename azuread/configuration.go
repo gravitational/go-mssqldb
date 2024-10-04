@@ -5,6 +5,8 @@ package azuread
 
 import (
 	"context"
+	"crypto"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"os"
@@ -30,6 +32,8 @@ const (
 	ActiveDirectoryApplication                 = "ActiveDirectoryApplication"
 	ActiveDirectoryServicePrincipal            = "ActiveDirectoryServicePrincipal"
 	ActiveDirectoryServicePrincipalAccessToken = "ActiveDirectoryServicePrincipalAccessToken"
+	ActiveDirectoryDeviceCode                  = "ActiveDirectoryDeviceCode"
+	ActiveDirectoryAzCli                       = "ActiveDirectoryAzCli"
 	scopeDefaultSuffix                         = "/.default"
 )
 
@@ -58,18 +62,12 @@ func parse(dsn string) (*azureFedAuthConfig, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	return newConfig(mssqlConfig)
-}
-
-// newConfig returns a config based on an msdsn.Config and a map of parameters.
-func newConfig(dsnConfig msdsn.Config) (*azureFedAuthConfig, error) {
 	config := &azureFedAuthConfig{
 		fedAuthLibrary: mssql.FedAuthLibraryReserved,
-		mssqlConfig:    dsnConfig,
+		mssqlConfig:    mssqlConfig,
 	}
 
-	err := config.validateParameters(dsnConfig.Parameters)
+	err = config.validateParameters(mssqlConfig.Parameters)
 	if err != nil {
 		return nil, err
 	}
@@ -79,14 +77,14 @@ func newConfig(dsnConfig msdsn.Config) (*azureFedAuthConfig, error) {
 
 func (p *azureFedAuthConfig) validateParameters(params map[string]string) error {
 
-	fedAuthWorkflow, _ := params["fedauth"]
+	fedAuthWorkflow := params["fedauth"]
 	if fedAuthWorkflow == "" {
 		return nil
 	}
 
 	p.fedAuthLibrary = mssql.FedAuthLibraryADAL
 
-	p.applicationClientID, _ = params["applicationclientid"]
+	p.applicationClientID = params["applicationclientid"]
 
 	switch {
 	case strings.EqualFold(fedAuthWorkflow, ActiveDirectoryPassword):
@@ -94,8 +92,8 @@ func (p *azureFedAuthConfig) validateParameters(params map[string]string) error 
 			return errors.New("applicationclientid parameter is required for " + ActiveDirectoryPassword)
 		}
 		p.adalWorkflow = mssql.FedAuthADALWorkflowPassword
-		p.user, _ = params["user id"]
-		p.password, _ = params["password"]
+		p.user = params["user id"]
+		p.password = params["password"]
 	case strings.EqualFold(fedAuthWorkflow, ActiveDirectoryIntegrated):
 		// Active Directory Integrated authentication is not fully supported:
 		// you can only use this by also implementing an a token provider
@@ -105,7 +103,7 @@ func (p *azureFedAuthConfig) validateParameters(params map[string]string) error 
 		// When using MSI, to request a specific client ID or user-assigned identity,
 		// provide the ID in the "user id" parameter
 		p.adalWorkflow = mssql.FedAuthADALWorkflowMSI
-		p.resourceID, _ = params["resource id"]
+		p.resourceID = params["resource id"]
 		p.clientID, _ = splitTenantAndClientID(params["user id"])
 	case strings.EqualFold(fedAuthWorkflow, ActiveDirectoryApplication) || strings.EqualFold(fedAuthWorkflow, ActiveDirectoryServicePrincipal):
 		p.adalWorkflow = mssql.FedAuthADALWorkflowPassword
@@ -116,36 +114,35 @@ func (p *azureFedAuthConfig) validateParameters(params map[string]string) error 
 			return errors.New("Must provide 'client id[@tenant id]' as username parameter when using ActiveDirectoryApplication authentication")
 		}
 
-		p.clientSecret, _ = params["password"]
+		p.clientSecret = params["password"]
 
-		p.certificatePath, _ = params["clientcertpath"]
+		p.certificatePath = params["clientcertpath"]
 
 		if p.certificatePath == "" && p.clientSecret == "" {
 			return errors.New("Must provide 'password' parameter when using ActiveDirectoryApplication authentication without cert/key credentials")
 		}
-	case strings.EqualFold(fedAuthWorkflow, ActiveDirectoryDefault):
+	case strings.EqualFold(fedAuthWorkflow, ActiveDirectoryDefault) || strings.EqualFold(fedAuthWorkflow, ActiveDirectoryAzCli) || strings.EqualFold(fedAuthWorkflow, ActiveDirectoryDeviceCode):
 		p.adalWorkflow = mssql.FedAuthADALWorkflowPassword
 	case strings.EqualFold(fedAuthWorkflow, ActiveDirectoryInteractive):
 		if p.applicationClientID == "" {
 			return errors.New("applicationclientid parameter is required for " + ActiveDirectoryInteractive)
 		}
-		p.adalWorkflow = mssql.FedAuthADALWorkflowPassword
 		// user is an optional login hint
-		p.user, _ = params["user id"]
+		p.user = params["user id"]
 		// we don't really have a password but we need to use some value.
 		p.adalWorkflow = mssql.FedAuthADALWorkflowPassword
 	case strings.EqualFold(fedAuthWorkflow, ActiveDirectoryServicePrincipalAccessToken):
 		p.fedAuthLibrary = mssql.FedAuthLibrarySecurityToken
 		p.adalWorkflow = mssql.FedAuthADALWorkflowNone
-		p.password, _ = params["password"]
+		p.password = params["password"]
 
 		if p.password == "" {
-			return errors.New("Must provide 'password' parameter when using ActiveDirectoryApplicationAuthToken authentication")
+			return errors.New("Must provide 'password' parameter when using ActiveDirectoryServicePrincipalAccessToken authentication")
 		}
 	default:
 		return fmt.Errorf("Invalid federated authentication type '%s': expected one of %+v",
 			fedAuthWorkflow,
-			[]string{ActiveDirectoryApplication, ActiveDirectoryServicePrincipal, ActiveDirectoryDefault, ActiveDirectoryIntegrated, ActiveDirectoryInteractive, ActiveDirectoryManagedIdentity, ActiveDirectoryMSI, ActiveDirectoryPassword})
+			[]string{ActiveDirectoryApplication, ActiveDirectoryServicePrincipal, ActiveDirectoryDefault, ActiveDirectoryIntegrated, ActiveDirectoryInteractive, ActiveDirectoryManagedIdentity, ActiveDirectoryMSI, ActiveDirectoryPassword, ActiveDirectoryAzCli, ActiveDirectoryDeviceCode})
 	}
 	p.fedAuthWorkflow = fedAuthWorkflow
 	return nil
@@ -161,10 +158,10 @@ func splitTenantAndClientID(user string) (string, string) {
 	return user[0:at], user[at+1:]
 }
 
-func splitAuthorityAndTenant(authorityUrl string) (string, string) {
-	separatorIndex := strings.LastIndex(authorityUrl, "/")
-	tenant := authorityUrl[separatorIndex+1:]
-	authority := authorityUrl[:separatorIndex]
+func splitAuthorityAndTenant(authorityURL string) (string, string) {
+	separatorIndex := strings.LastIndex(authorityURL, "/")
+	tenant := authorityURL[separatorIndex+1:]
+	authority := authorityURL[:separatorIndex]
 	return authority, tenant
 }
 
@@ -176,18 +173,21 @@ func (p *azureFedAuthConfig) provideActiveDirectoryToken(ctx context.Context, se
 	if p.tenantID != "" {
 		tenant = p.tenantID
 	}
-	scope := stsURL
+	scope := serverSPN
 	if !strings.HasSuffix(serverSPN, scopeDefaultSuffix) {
-		scope = strings.TrimRight(serverSPN, "/") + scopeDefaultSuffix
+		scope = serverSPN + scopeDefaultSuffix
 	}
 
 	switch p.fedAuthWorkflow {
 	case ActiveDirectoryServicePrincipal, ActiveDirectoryApplication:
 		switch {
 		case p.certificatePath != "":
-			certData, err := os.ReadFile(p.certificatePath)
+			var certData []byte
+			certData, err = os.ReadFile(p.certificatePath)
 			if err != nil {
-				certs, key, err := azidentity.ParseCertificates(certData, []byte(p.clientSecret))
+				var certs []*x509.Certificate
+				var key crypto.PrivateKey
+				certs, key, err = azidentity.ParseCertificates(certData, []byte(p.clientSecret))
 				if err != nil {
 					cred, err = azidentity.NewClientCertificateCredential(tenant, p.clientID, certs, key, nil)
 				}
@@ -212,6 +212,10 @@ func (p *azureFedAuthConfig) provideActiveDirectoryToken(ctx context.Context, se
 		config := azcore.ClientOptions{Cloud: c}
 		cred, err = azidentity.NewInteractiveBrowserCredential(&azidentity.InteractiveBrowserCredentialOptions{ClientOptions: config, ClientID: p.applicationClientID})
 
+	case ActiveDirectoryDeviceCode:
+		cred, err = azidentity.NewDeviceCodeCredential(&azidentity.DeviceCodeCredentialOptions{ClientID: p.applicationClientID})
+	case ActiveDirectoryAzCli:
+		cred, err = azidentity.NewAzureCLICredential(&azidentity.AzureCLICredentialOptions{TenantID: p.tenantID})
 	default:
 		// Integrated just uses Default until azidentity adds Windows-specific authentication
 		cred, err = azidentity.NewDefaultAzureCredential(nil)

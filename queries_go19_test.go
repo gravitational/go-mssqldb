@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"reflect"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -31,6 +32,32 @@ func TestOutputParam(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	t.Run("varchar(max) to sql.NullString", func(t *testing.T) {
+		sqltextcreate := `CREATE PROCEDURE [GetTask]
+		@strparam varchar(max) = NULL OUTPUT
+	AS
+	SELECT @strparam = REPLICATE('a', 8000)
+	RETURN 0`
+		sqltextdrop := `drop procedure GetTask`
+		sqltextrun := `GetTask`
+		_, _ = db.ExecContext(ctx, sqltextdrop)
+		_, err = db.ExecContext(ctx, sqltextcreate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.ExecContext(ctx, sqltextdrop)
+		nullstr := sql.NullString{}
+		_, err := db.ExecContext(ctx, sqltextrun,
+			sql.Named("strparam", sql.Out{Dest: &nullstr}),
+		)
+		if err != nil {
+			t.Error(err)
+		}
+		defer db.ExecContext(ctx, sqltextdrop)
+		if nullstr.String != strings.Repeat("a", 8000) {
+			t.Error("Got incorrect NullString of length:", len(nullstr.String))
+		}
+	})
 	t.Run("sp with rows", func(t *testing.T) {
 		sqltextcreate := `
 CREATE PROCEDURE spwithrows
@@ -343,6 +370,155 @@ SELECT @param2 = 'World'
 				t.Errorf(`@param2: expected "World", got %#v`, param2)
 			}
 		})
+	})
+}
+
+func TestOutputINOUTStringParam(t *testing.T) {
+	sqltextcreate := `
+CREATE PROCEDURE vinout
+   @sinout NVARCHAR(4000) OUTPUT
+AS
+BEGIN
+	IF @sinout = 'empty'
+		SET @sinout = NULL
+	ELSE
+		SET @sinout = 'long_long_value'
+END;
+`
+	sqltextdrop := `DROP PROCEDURE vinout;`
+	sqltextrun := `vinout`
+
+	checkConnStr(t)
+	tl := testLogger{t: t}
+	defer tl.StopLogging()
+	SetLogger(&tl)
+
+	db, err := sql.Open("sqlserver", makeConnStr(t).String())
+	if err != nil {
+		t.Fatalf("failed to open driver sqlserver")
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	db.ExecContext(ctx, sqltextdrop)
+	_, err = db.ExecContext(ctx, sqltextcreate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.ExecContext(ctx, sqltextdrop)
+
+	t.Run("original test", func(t *testing.T) {
+		sinout := "short_value"
+		_, err = db.ExecContext(ctx, sqltextrun,
+			sql.Named("sinout", sql.Out{Dest: &sinout}),
+		)
+		if err != nil {
+			t.Error(err)
+		}
+
+		if sinout != "long_long_value" {
+			t.Errorf("expected long_long_value, got %s", sinout)
+		}
+	})
+
+	t.Run("nullable value", func(t *testing.T) {
+		sinout := sql.NullString{String: "short_value", Valid: true}
+		_, err = db.ExecContext(ctx, sqltextrun,
+			sql.Named("sinout", sql.Out{Dest: &sinout}),
+		)
+		if err != nil {
+			t.Error(err)
+		}
+
+		if !sinout.Valid || sinout.String != "long_long_value" {
+			if sinout.Valid {
+				t.Errorf("expected long_long_value, got %s", sinout.String)
+			} else {
+				t.Errorf("expected long_long_value, got NULL")
+			}
+		}
+	})
+
+	t.Run("null value", func(t *testing.T) {
+		sinout := sql.NullString{}
+		_, err = db.ExecContext(ctx, sqltextrun,
+			sql.Named("sinout", sql.Out{Dest: &sinout}),
+		)
+		if err != nil {
+			t.Error(err)
+		}
+
+		if !sinout.Valid || sinout.String != "long_long_value" {
+			if sinout.Valid {
+				t.Errorf("expected long_long_value, got %s", sinout.String)
+			} else {
+				t.Errorf("expected long_long_value, got NULL")
+			}
+		}
+	})
+
+	t.Run("null result", func(t *testing.T) {
+		sinout := sql.NullString{String: "empty", Valid: true}
+		_, err = db.ExecContext(ctx, sqltextrun,
+			sql.Named("sinout", sql.Out{Dest: &sinout}),
+		)
+		if err != nil {
+			t.Error(err)
+		}
+
+		if sinout.Valid {
+			t.Errorf("expected NULL, got %s", sinout.String)
+		}
+	})
+}
+
+func TestOutputINOUTBytesParam(t *testing.T) {
+	sqltextcreate := `
+CREATE PROCEDURE vinout
+   @binout VARBINARY(4000) OUTPUT
+AS
+BEGIN
+	SET @binout = CONVERT(VARBINARY(4000), 'long_long_value')
+END;
+`
+	sqltextdrop := `DROP PROCEDURE vinout;`
+	sqltextrun := `vinout`
+
+	checkConnStr(t)
+	tl := testLogger{t: t}
+	defer tl.StopLogging()
+	SetLogger(&tl)
+
+	db, err := sql.Open("sqlserver", makeConnStr(t).String())
+	if err != nil {
+		t.Fatalf("failed to open driver sqlserver")
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	db.ExecContext(ctx, sqltextdrop)
+	_, err = db.ExecContext(ctx, sqltextcreate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.ExecContext(ctx, sqltextdrop)
+
+	t.Run("original test", func(t *testing.T) {
+		binout := []byte("short_value")
+		_, err = db.ExecContext(ctx, sqltextrun,
+			sql.Named("binout", sql.Out{Dest: &binout}),
+		)
+		if err != nil {
+			t.Error(err)
+		}
+
+		if !bytes.Equal(binout, []byte("long_long_value")) {
+			t.Errorf("expected long_long_value, got %s", string(binout))
+		}
 	})
 }
 
@@ -1048,6 +1224,7 @@ func TestClearReturnStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer conn.Close()
 
 	_, err = conn.ExecContext(ctx, "CREATE PROC #get_answer AS RETURN 42")
 	if err != nil {

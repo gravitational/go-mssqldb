@@ -3,6 +3,7 @@ package mssql
 import (
 	"bytes"
 	"context"
+	"database/sql/driver"
 	"encoding/binary"
 	"fmt"
 	"math"
@@ -250,6 +251,10 @@ func (b *Bulk) createColMetadata() []byte {
 	buf.WriteByte(byte(tokenColMetadata))                              // token
 	binary.Write(buf, binary.LittleEndian, uint16(len(b.bulkColumns))) // column count
 
+	// TODO: Write a valid CEK table if any parameters have cekTableEntry values
+	if b.cn.sess.alwaysEncrypted {
+		binary.Write(buf, binary.LittleEndian, uint16(0))
+	}
 	for i, col := range b.bulkColumns {
 
 		if b.cn.sess.loginAck.TDSVersion >= verTDS72 {
@@ -259,7 +264,7 @@ func (b *Bulk) createColMetadata() []byte {
 		}
 		binary.Write(buf, binary.LittleEndian, uint16(col.Flags))
 
-		writeTypeInfo(buf, &b.bulkColumns[i].ti)
+		writeTypeInfo(buf, &b.bulkColumns[i].ti, false)
 
 		if col.ti.TypeId == typeNText ||
 			col.ti.TypeId == typeText ||
@@ -313,6 +318,19 @@ func (b *Bulk) getMetadata(ctx context.Context) (err error) {
 func (b *Bulk) makeParam(val DataValue, col columnStruct) (res param, err error) {
 	res.ti.Size = col.ti.Size
 	res.ti.TypeId = col.ti.TypeId
+
+	switch valuer := val.(type) {
+	case driver.Valuer:
+		var e error
+		val, e = driver.DefaultParameterConverter.ConvertValue(valuer)
+		if e != nil {
+			err = e
+			return
+		}
+		if val != nil {
+			return b.makeParam(val, col)
+		}
+	}
 
 	if val == nil {
 		res.ti.Size = 0
