@@ -23,9 +23,18 @@ func (t tcpDialer) ParseBrowserData(data msdsn.BrowserData, p *msdsn.Config) err
 	// for the instance and discover its port.
 	ok := len(data) > 0
 	strport := ""
+	inst := ""
 	if ok {
 		p.Instance = strings.ToUpper(p.Instance)
-		strport, ok = data[p.Instance]["tcp"]
+		instanceName := stringForInstanceNameComparison(p.Instance)
+		for _, i := range data {
+			inst, ok = i["InstanceName"]
+			if ok && stringForInstanceNameComparison(inst) == instanceName {
+				strport, ok = i["tcp"]
+				break
+			}
+			ok = false
+		}
 	}
 	if !ok {
 		f := "no instance matching '%v' returned from host '%v'"
@@ -40,6 +49,16 @@ func (t tcpDialer) ParseBrowserData(data msdsn.BrowserData, p *msdsn.Config) err
 	return nil
 }
 
+// SQL returns ASCII encoded instance names with \x## escaped UTF16 code points.
+// We use QuoteToASCII to normalize strings like TJUTVÅ
+// SQL returns 0xc5 as the byte value for Å while the UTF8 bytes in a Go string are [195 133]
+// QuoteToASCII returns "TJUTV\u00c5" for both
+func stringForInstanceNameComparison(inst string) (instanceName string) {
+	instanceName = strings.Replace(strconv.QuoteToASCII(inst), `\u00`, `\x`, -1)
+	instanceName = strings.Replace(instanceName, `\u`, `\x`, -1)
+	return
+}
+
 func (t tcpDialer) DialConnection(ctx context.Context, p *msdsn.Config) (conn net.Conn, err error) {
 	return nil, fmt.Errorf("tcp dialer requires a Connector instance")
 }
@@ -50,7 +69,17 @@ func (t tcpDialer) DialConnection(ctx context.Context, p *msdsn.Config) (conn ne
 func (t tcpDialer) DialSqlConnection(ctx context.Context, c *Connector, p *msdsn.Config) (conn net.Conn, err error) {
 	var ips []net.IP
 	ip := net.ParseIP(p.Host)
+	portStr := strconv.Itoa(int(resolveServerPort(p.Port)))
+
 	if ip == nil {
+		// if the custom dialer is a host dialer, the DNS is resolved within the network
+		// the dialer is sending the request to, rather than the one the driver is running on
+		d := c.getDialer(p)
+		if _, ok := d.(HostDialer); ok {
+			addr := net.JoinHostPort(p.Host, portStr)
+			return d.DialContext(ctx, "tcp", addr)
+		}
+
 		ips, err = net.LookupIP(p.Host)
 		if err != nil {
 			return
@@ -58,16 +87,22 @@ func (t tcpDialer) DialSqlConnection(ctx context.Context, c *Connector, p *msdsn
 	} else {
 		ips = []net.IP{ip}
 	}
-	if len(ips) == 1 {
-		d := c.getDialer(p)
-		addr := net.JoinHostPort(ips[0].String(), strconv.Itoa(int(resolveServerPort(p.Port))))
-		conn, err = d.DialContext(ctx, "tcp", addr)
 
+	if len(ips) == 1 || !p.MultiSubnetFailover {
+		// Try to connect to IPs sequentially until one is successful per MultiSubnetFailover false rules
+		for _, ipaddress := range ips {
+			d := c.getDialer(p)
+			addr := net.JoinHostPort(ipaddress.String(), portStr)
+			conn, err = d.DialContext(ctx, "tcp", addr)
+			if err == nil {
+				break
+			}
+		}
 	} else {
 		//Try Dials in parallel to avoid waiting for timeouts.
 		connChan := make(chan net.Conn, len(ips))
 		errChan := make(chan error, len(ips))
-		portStr := strconv.Itoa(int(resolveServerPort(p.Port)))
+
 		for _, ip := range ips {
 			go func(ip net.IP) {
 				d := c.getDialer(p)

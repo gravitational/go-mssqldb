@@ -8,6 +8,7 @@ import (
 	"math"
 	"reflect"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/microsoft/go-mssqldb/internal/cp"
@@ -89,6 +90,8 @@ const (
 // http://msdn.microsoft.com/en-us/library/dd358284.aspx
 type typeInfo struct {
 	TypeId    uint8
+	UserType  uint32
+	Flags     uint16
 	Size      int
 	Scale     uint8
 	Prec      uint8
@@ -96,7 +99,7 @@ type typeInfo struct {
 	Collation cp.Collation
 	UdtInfo   udtInfo
 	XmlInfo   xmlInfo
-	Reader    func(ti *typeInfo, r *tdsBuffer) (res interface{})
+	Reader    func(ti *typeInfo, r *tdsBuffer, cryptoMeta *cryptoMetadata) (res interface{})
 	Writer    func(w io.Writer, ti typeInfo, buf []byte) (err error)
 }
 
@@ -119,13 +122,13 @@ type xmlInfo struct {
 	XmlSchemaCollection string
 }
 
-func ReadTypeInfo(r *TDSBuffer) typeInfo {
-	return readTypeInfo(r)
+func ReadTypeInfo(r *TDSBuffer, typeId byte, c *CryptoMetadata) typeInfo {
+	return readTypeInfo(r, typeId, c)
 }
 
-func readTypeInfo(r *tdsBuffer) (res typeInfo) {
-	res.TypeId = r.byte()
-	switch res.TypeId {
+func readTypeInfo(r *tdsBuffer, typeId byte, c *cryptoMetadata) (res typeInfo) {
+	res.TypeId = typeId
+	switch typeId {
 	case typeNull, typeInt1, typeBit, typeInt2, typeInt4, typeDateTim4,
 		typeFlt4, typeMoney, typeDateTime, typeFlt8, typeMoney4, typeInt8:
 		// those are fixed length types
@@ -144,13 +147,13 @@ func readTypeInfo(r *tdsBuffer) (res typeInfo) {
 		res.Reader = readFixedType
 		res.Buffer = make([]byte, res.Size)
 	default: // all others are VARLENTYPE
-		readVarLen(&res, r)
+		readVarLen(&res, r, c)
 	}
 	return
 }
 
 // https://msdn.microsoft.com/en-us/library/dd358284.aspx
-func writeTypeInfo(w io.Writer, ti *typeInfo) (err error) {
+func writeTypeInfo(w io.Writer, ti *typeInfo, out bool) (err error) {
 	err = binary.Write(w, binary.LittleEndian, ti.TypeId)
 	if err != nil {
 		return
@@ -164,7 +167,7 @@ func writeTypeInfo(w io.Writer, ti *typeInfo) (err error) {
 	case typeTvp:
 		ti.Writer = writeFixedType
 	default: // all others are VARLENTYPE
-		err = writeVarLen(w, ti)
+		err = writeVarLen(w, ti, out)
 		if err != nil {
 			return
 		}
@@ -178,7 +181,7 @@ func writeFixedType(w io.Writer, ti typeInfo, buf []byte) (err error) {
 }
 
 // https://msdn.microsoft.com/en-us/library/dd358341.aspx
-func writeVarLen(w io.Writer, ti *typeInfo) (err error) {
+func writeVarLen(w io.Writer, ti *typeInfo, out bool) (err error) {
 	switch ti.TypeId {
 
 	case typeDateN:
@@ -224,7 +227,7 @@ func writeVarLen(w io.Writer, ti *typeInfo) (err error) {
 		typeNVarChar, typeNChar, typeXml, typeUdt:
 
 		// short len types
-		if ti.Size > 8000 || ti.Size == 0 {
+		if ti.Size > 8000 || ti.Size == 0 || out {
 			if err = binary.Write(w, binary.LittleEndian, uint16(0xffff)); err != nil {
 				return
 			}
@@ -319,7 +322,7 @@ func decodeDateTime(buf []byte) time.Time {
 		0, 0, secs, ns, time.UTC)
 }
 
-func readFixedType(ti *typeInfo, r *tdsBuffer) interface{} {
+func readFixedType(ti *typeInfo, r *tdsBuffer, c *cryptoMetadata) interface{} {
 	r.ReadFull(ti.Buffer)
 	buf := ti.Buffer
 	switch ti.TypeId {
@@ -353,8 +356,13 @@ func readFixedType(ti *typeInfo, r *tdsBuffer) interface{} {
 	panic("shoulnd't get here")
 }
 
-func readByteLenType(ti *typeInfo, r *tdsBuffer) interface{} {
-	size := r.byte()
+func readByteLenType(ti *typeInfo, r *tdsBuffer, c *cryptoMetadata) interface{} {
+	var size byte
+	if c != nil {
+		size = byte(r.rsize)
+	} else {
+		size = r.byte()
+	}
 	if size == 0 {
 		return nil
 	}
@@ -437,7 +445,7 @@ func readByteLenType(ti *typeInfo, r *tdsBuffer) interface{} {
 	default:
 		badStreamPanicf("Invalid typeid")
 	}
-	panic("shoulnd't get here")
+	panic("shouldn't get here")
 }
 
 func writeByteLenType(w io.Writer, ti typeInfo, buf []byte) (err error) {
@@ -452,8 +460,13 @@ func writeByteLenType(w io.Writer, ti typeInfo, buf []byte) (err error) {
 	return
 }
 
-func readShortLenType(ti *typeInfo, r *tdsBuffer) interface{} {
-	size := r.uint16()
+func readShortLenType(ti *typeInfo, r *tdsBuffer, c *cryptoMetadata) interface{} {
+	var size uint16
+	if c != nil {
+		size = uint16(r.rsize)
+	} else {
+		size = r.uint16()
+	}
 	if size == 0xffff {
 		return nil
 	}
@@ -495,7 +508,7 @@ func writeShortLenType(w io.Writer, ti typeInfo, buf []byte) (err error) {
 	return
 }
 
-func readLongLenType(ti *typeInfo, r *tdsBuffer) interface{} {
+func readLongLenType(ti *typeInfo, r *tdsBuffer, c *cryptoMetadata) interface{} {
 	// information about this format can be found here:
 	// http://msdn.microsoft.com/en-us/library/dd304783.aspx
 	// and here:
@@ -570,7 +583,7 @@ func writeCollation(w io.Writer, col cp.Collation) (err error) {
 
 // reads variant value
 // http://msdn.microsoft.com/en-us/library/dd303302.aspx
-func readVariantType(ti *typeInfo, r *tdsBuffer) interface{} {
+func readVariantType(ti *typeInfo, r *tdsBuffer, c *cryptoMetadata) interface{} {
 	size := r.int32()
 	if size == 0 {
 		return nil
@@ -662,45 +675,51 @@ func readVariantType(ti *typeInfo, r *tdsBuffer) interface{} {
 
 // partially length prefixed stream
 // http://msdn.microsoft.com/en-us/library/dd340469.aspx
-func readPLPType(ti *typeInfo, r *tdsBuffer) interface{} {
-	size := r.uint64()
-	var buf *bytes.Buffer
-	switch size {
-	case _PLP_NULL:
-		// null
-		return nil
-	case _UNKNOWN_PLP_LEN:
-		// size unknown
-		buf = bytes.NewBuffer(make([]byte, 0, 1000))
-	default:
-		// PLP types can set their size to max unit64 (2^64) bytes causing a
-		// large allocation that can takes some time to complete or panic
-		// due to lack of memory. To avoid this we're using a fixed size buffer
-		// with same size as used on `io.Copy` internal buffer: https://github.com/golang/go/blob/release-branch.go1.20/src/io/io.go#L416
-		buf = bytes.NewBuffer(make([]byte, 0, 32*1024))
-	}
-	for {
-		chunksize := r.uint32()
-		if chunksize == 0 {
-			break
+func readPLPType(ti *typeInfo, r *tdsBuffer, c *cryptoMetadata) interface{} {
+	var bytesToDecode []byte
+	if c == nil {
+		size := r.uint64()
+		var buf *bytes.Buffer
+		switch size {
+		case _PLP_NULL:
+			// null
+			return nil
+		case _UNKNOWN_PLP_LEN:
+			// size unknown
+			buf = bytes.NewBuffer(make([]byte, 0, 1000))
+		default:
+			// PLP types can set their size to max unit64 (2^64) bytes causing a
+			// large allocation that can takes some time to complete or panic
+			// due to lack of memory. To avoid this we're using a fixed size buffer
+			// with same size as used on `io.Copy` internal buffer: https://github.com/golang/go/blob/release-branch.go1.20/src/io/io.go#L416
+			buf = bytes.NewBuffer(make([]byte, 0, 32*1024))
 		}
-		if _, err := io.CopyN(buf, r, int64(chunksize)); err != nil {
-			badStreamPanicf("Reading PLP type failed: %s", err.Error())
+		for {
+			chunksize := r.uint32()
+			if chunksize == 0 {
+				break
+			}
+			if _, err := io.CopyN(buf, r, int64(chunksize)); err != nil {
+				badStreamPanicf("Reading PLP type failed: %s", err.Error())
+			}
 		}
+		bytesToDecode = buf.Bytes()
+	} else {
+		bytesToDecode = r.rbuf
 	}
 	switch ti.TypeId {
 	case typeXml:
-		return decodeXml(*ti, buf.Bytes())
+		return decodeXml(*ti, bytesToDecode)
 	case typeBigVarChar, typeBigChar, typeText:
-		return decodeChar(ti.Collation, buf.Bytes())
+		return decodeChar(ti.Collation, bytesToDecode)
 	case typeBigVarBin, typeBigBinary, typeImage:
-		return buf.Bytes()
+		return bytesToDecode
 	case typeNVarChar, typeNChar, typeNText:
-		return decodeNChar(buf.Bytes())
+		return decodeNChar(bytesToDecode)
 	case typeUdt:
-		return decodeUdt(*ti, buf.Bytes())
+		return decodeUdt(*ti, bytesToDecode)
 	}
-	panic("shoulnd't get here")
+	panic("shouldn't get here")
 }
 
 func writePLPType(w io.Writer, ti typeInfo, buf []byte) (err error) {
@@ -727,7 +746,7 @@ func writePLPType(w io.Writer, ti typeInfo, buf []byte) (err error) {
 	}
 }
 
-func readVarLen(ti *typeInfo, r *tdsBuffer) {
+func readVarLen(ti *typeInfo, r *tdsBuffer, c *cryptoMetadata) {
 	switch ti.TypeId {
 	case typeDateN:
 		ti.Size = 3
@@ -1127,6 +1146,8 @@ func makeGoLangScanType(ti typeInfo) reflect.Type {
 		return reflect.TypeOf([]byte{})
 	case typeVariant:
 		return reflect.TypeOf(nil)
+	case typeUdt:
+		return reflect.TypeOf([]byte{})
 	default:
 		panic(fmt.Sprintf("not implemented makeGoLangScanType for type %d", ti.TypeId))
 	}
@@ -1356,6 +1377,8 @@ func makeGoLangTypeName(ti typeInfo) string {
 		return "SQL_VARIANT"
 	case typeBigBinary:
 		return "BINARY"
+	case typeUdt:
+		return strings.ToUpper(ti.UdtInfo.TypeName)
 	default:
 		panic(fmt.Sprintf("not implemented makeGoLangTypeName for type %d", ti.TypeId))
 	}
@@ -1480,9 +1503,22 @@ func makeGoLangTypeLength(ti typeInfo) (int64, bool) {
 		return 0, false
 	case typeBigBinary:
 		return int64(ti.Size), true
+	case typeUdt:
+		switch ti.UdtInfo.TypeName {
+		case "hierarchyid":
+			// https://learn.microsoft.com/en-us/sql/t-sql/data-types/hierarchyid-data-type-method-reference?view=sql-server-ver16
+			return 892, true
+		case "geography":
+		case "geometry":
+			return 2147483647, true
+		default:
+			panic(fmt.Sprintf("not implemented makeGoLangTypeLength for user defined type %s", ti.UdtInfo.TypeName))
+		}
 	default:
 		panic(fmt.Sprintf("not implemented makeGoLangTypeLength for type %d", ti.TypeId))
 	}
+
+	return 0, false
 }
 
 // makes go/sql type precision and scale as described below
@@ -1591,6 +1627,8 @@ func makeGoLangTypePrecisionScale(ti typeInfo) (int64, int64, bool) {
 	case typeVariant:
 		return 0, 0, false
 	case typeBigBinary:
+		return 0, 0, false
+	case typeUdt:
 		return 0, 0, false
 	default:
 		panic(fmt.Sprintf("not implemented makeGoLangTypePrecisionScale for type %d", ti.TypeId))

@@ -135,6 +135,7 @@ func TestSelect(t *testing.T) {
 			{"cast(cast('abc' as varchar(3)) as sql_variant)", "abc"},
 			{"cast(cast('abc' as char(3)) as sql_variant)", "abc"},
 			{"cast(N'abc' as sql_variant)", "abc"},
+			{"cast('/' as hierarchyid)", []byte{}},
 		}
 
 		for _, test := range values {
@@ -197,6 +198,19 @@ func TestSelect(t *testing.T) {
 				t.Errorf("Expected nil, got %v", retval)
 			}
 		})
+	})
+	t.Run("scan into sql.NullString", func(t *testing.T) {
+		row := conn.QueryRow("SELECT REPLICATE('a', 8000)")
+		var out sql.NullString
+		err := row.Scan(&out)
+		if err != nil {
+			t.Error("Scan to NullString failed", err.Error())
+			return
+		}
+
+		if out.String != strings.Repeat("a", 8000) {
+			t.Error("got back a string with count:", len(out.String))
+		}
 	})
 }
 
@@ -1036,6 +1050,7 @@ func TestStmt_SetQueryNotification(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to open connection: %v", err)
 	}
+	defer cn.Close()
 	stmt, err := cn.Prepare("SELECT 1")
 	if err != nil {
 		t.Error("Connection failed", err)
@@ -1668,6 +1683,9 @@ func TestColumnTypeIntrospection(t *testing.T) {
 		{"cast('abc' as char(3))", "CHAR", reflect.TypeOf(""), true, 3, false, 0, 0},
 		{"cast(N'abc' as nchar(3))", "NCHAR", reflect.TypeOf(""), true, 3, false, 0, 0},
 		{"cast(1 as sql_variant)", "SQL_VARIANT", reflect.TypeOf(nil), false, 0, false, 0, 0},
+		{"geometry::STGeomFromText('LINESTRING (100 100, 20 180, 180 180)', 0)", "GEOMETRY", reflect.TypeOf([]byte{}), true, 2147483647, false, 0, 0},
+		{"geography::STGeomFromText('LINESTRING(-122.360 47.656, -122.343 47.656 )', 4326)", "GEOGRAPHY", reflect.TypeOf([]byte{}), false, 2147483647, false, 0, 0},
+		{"cast('/1/2/3/' as hierarchyid)", "HIERARCHYID", reflect.TypeOf([]byte{}), true, 892, false, 0, 0},
 	}
 	conn, logger := open(t)
 	defer conn.Close()
@@ -2759,5 +2777,25 @@ func skipIfNamedPipesEnabled(t *testing.T) {
 	t.Helper()
 	if len(msdsn.ProtocolParsers) > 1 {
 		t.Skip("Skipping test due to named pipes dialer")
+	}
+}
+
+func TestAdminConnection(t *testing.T) {
+	params := testConnParams(t)
+	protocol, ok := params.Parameters["protocol"]
+	if !ok || protocol != "admin" {
+		t.Skip("Test is not running with admin protocol set")
+	}
+	conn, _ := open(t)
+	defer conn.Close()
+	row := conn.QueryRow(`SELECT  c.net_transport 
+	FROM sys.dm_exec_connections c
+	JOIN sys.tcp_endpoints e ON c.endpoint_id = e.endpoint_id
+	WHERE c.session_id = @@SPID AND e.name = 'Dedicated Admin Connection'`)
+	if err := row.Scan(&protocol); err != nil {
+		t.Fatalf("Unable to query connection protocol or not connected on DAC %s", err.Error())
+	}
+	if !strings.EqualFold(protocol, "tcp") {
+		t.Fatalf("Tcp connection not made. Protocol: %s", protocol)
 	}
 }

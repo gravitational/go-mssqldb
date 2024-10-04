@@ -15,9 +15,18 @@ import (
 	"unicode/utf16"
 	"unicode/utf8"
 
+	"github.com/microsoft/go-mssqldb/aecmk"
 	"github.com/microsoft/go-mssqldb/integratedauth"
 	"github.com/microsoft/go-mssqldb/msdsn"
 )
+
+func parseDAC(msg []byte, instance string) msdsn.BrowserData {
+	results := msdsn.BrowserData{}
+	if len(msg) == 6 && msg[0] == 5 {
+		results[strings.ToUpper(instance)]["tcp"] = fmt.Sprint(binary.LittleEndian.Uint16(msg[5:]))
+	}
+	return results
+}
 
 func parseInstances(msg []byte) msdsn.BrowserData {
 	results := msdsn.BrowserData{}
@@ -48,23 +57,38 @@ func parseInstances(msg []byte) msdsn.BrowserData {
 	return results
 }
 
-func getInstances(ctx context.Context, d Dialer, address string) (msdsn.BrowserData, error) {
-	conn, err := d.DialContext(ctx, "udp", net.JoinHostPort(address, "1434"))
+func getInstances(ctx context.Context, d Dialer, address string, browserMsg msdsn.BrowserMsg, instance string) (msdsn.BrowserData, error) {
 	emptyInstances := msdsn.BrowserData{}
+	var bmsg []byte
+	var resp []byte
+	if browserMsg == msdsn.BrowserDAC {
+		bmsg = make([]byte, 3+len(instance))
+		bmsg[0] = byte(msdsn.BrowserDAC)
+		bmsg[1] = 1
+		_ = copy(bmsg[3:], instance)
+		resp = make([]byte, 6)
+	} else { // default to AllInstances
+		bmsg = []byte{byte(msdsn.BrowserAllInstances)}
+		resp = make([]byte, 16*1024-1)
+	}
+	conn, err := d.DialContext(ctx, "udp", net.JoinHostPort(address, "1434"))
 	if err != nil {
 		return emptyInstances, err
 	}
 	defer conn.Close()
 	deadline, _ := ctx.Deadline()
 	conn.SetDeadline(deadline)
-	_, err = conn.Write([]byte{3})
+	_, err = conn.Write(bmsg)
 	if err != nil {
 		return emptyInstances, err
 	}
-	var resp = make([]byte, 16*1024-1)
+
 	read, err := conn.Read(resp)
 	if err != nil {
 		return emptyInstances, err
+	}
+	if browserMsg == msdsn.BrowserDAC {
+		return parseDAC(resp[:read], instance), nil
 	}
 	return parseInstances(resp[:read]), nil
 }
@@ -79,6 +103,7 @@ const (
 	verTDS73     = verTDS73A
 	verTDS73B    = 0x730B0003
 	verTDS74     = 0x74000004
+	verTDS80     = 0x08000000
 )
 
 // packet types
@@ -120,6 +145,7 @@ const (
 	encryptOn     = 1 // Encryption is available and on.
 	encryptNotSup = 2 // Encryption is not available.
 	encryptReq    = 3 // Encryption is required.
+	encryptStrict = 4
 )
 
 const (
@@ -134,17 +160,24 @@ const (
 )
 
 type tdsSession struct {
-	buf          *tdsBuffer
-	loginAck     loginAckStruct
-	database     string
-	partner      string
-	columns      []columnStruct
-	tranid       uint64
-	logFlags     uint64
-	logger       ContextLogger
-	routedServer string
-	routedPort   uint16
-	loginFlags   []Token
+	buf             *tdsBuffer
+	loginAck        loginAckStruct
+	database        string
+	partner         string
+	columns         []columnStruct
+	tranid          uint64
+	logFlags        uint64
+	logger          ContextLogger
+	routedServer    string
+	routedPort      uint16
+	loginFlags      []Token
+	alwaysEncrypted bool
+	aeSettings      *alwaysEncryptedSettings
+}
+
+type alwaysEncryptedSettings struct {
+	enclaveType  string
+	keyProviders aecmk.ColumnEncryptionKeyProviderMap
 }
 
 const (
@@ -156,10 +189,26 @@ const (
 )
 
 type columnStruct struct {
-	UserType uint32
-	Flags    uint16
-	ColName  string
-	ti       typeInfo
+	UserType   uint32
+	Flags      uint16
+	ColName    string
+	ti         typeInfo
+	cryptoMeta *cryptoMetadata
+}
+
+func (c columnStruct) isEncrypted() bool {
+	return isEncryptedFlag(c.Flags)
+}
+
+func isEncryptedFlag(flags uint16) bool {
+	return colFlagEncrypted == (flags & colFlagEncrypted)
+}
+
+func (c columnStruct) originalTypeInfo() typeInfo {
+	if c.isEncrypted() {
+		return c.cryptoMeta.typeInfo
+	}
+	return c.ti
 }
 
 type keySlice []uint8
@@ -573,7 +622,7 @@ func sendLogin(w *tdsBuffer, login *login) error {
 	language := str2ucs2(login.Language)
 	database := str2ucs2(login.Database)
 	atchdbfile := str2ucs2(login.AtchDBFile)
-	changepassword := str2ucs2(login.ChangePassword)
+	changepassword := manglePassword(login.ChangePassword)
 	featureExt := login.FeatureExt.toBytes()
 
 	hdr := loginHeader{
@@ -634,6 +683,9 @@ func sendLogin(w *tdsBuffer, login *login) error {
 		hdr.ExtensionLength = 4
 		offset += hdr.ExtensionLength // DWORD
 		featureExtOffset = uint32(offset)
+	}
+	if len(changepassword) > 0 {
+		hdr.OptionFlags3 |= fChangePassword
 	}
 	hdr.Length = uint32(offset) + uint32(featureExtLen)
 
@@ -924,7 +976,7 @@ func dialConnection(ctx context.Context, c *Connector, p *msdsn.Config, logger C
 		if dialer.CallBrowser(p) {
 			if instances == nil {
 				d := c.getDialer(p)
-				instances, err = getInstances(ctx, d, p.Host)
+				instances, err = getInstances(ctx, d, p.Host, p.BrowserMessage, p.Instance)
 				if err != nil && logger != nil && uint64(p.LogFlags)&logErrors != 0 {
 					e := fmt.Sprintf("unable to get instances from Sql Server Browser on host %v: %v", p.Host, err.Error())
 					logger.Log(ctx, msdsn.Log(logErrors), e)
@@ -974,6 +1026,8 @@ func preparePreloginFields(p msdsn.Config, fe *featureExtFedAuth) map[uint8][]by
 		encrypt = encryptOn
 	case msdsn.EncryptionOff:
 		encrypt = encryptOff
+	case msdsn.EncryptionStrict:
+		encrypt = encryptStrict
 	}
 	v := getDriverVersion(driverVersion)
 	fields := map[uint8][]byte{
@@ -1020,6 +1074,12 @@ func interpretPreloginResponse(p msdsn.Config, fe *featureExtFedAuth, fields map
 }
 
 func prepareLogin(ctx context.Context, c *Connector, p msdsn.Config, logger ContextLogger, auth integratedauth.IntegratedAuthenticator, fe *featureExtFedAuth, packetSize uint32) (l *login, err error) {
+	var TDSVersion uint32
+	if p.Encryption == msdsn.EncryptionStrict {
+		TDSVersion = verTDS80
+	} else {
+		TDSVersion = verTDS74
+	}
 	var typeFlags uint8
 	if p.ReadOnlyIntent {
 		typeFlags |= fReadOnlyIntent
@@ -1032,17 +1092,21 @@ func prepareLogin(ctx context.Context, c *Connector, p msdsn.Config, logger Cont
 		serverName = p.Host
 	}
 	l = &login{
-		TDSVersion:    verTDS74,
-		PacketSize:    packetSize,
-		Database:      p.Database,
-		OptionFlags2:  p.LoginOptions.OptionFlags2 | fODBC, // to get unlimited TEXTSIZE,
-		OptionFlags1:  p.LoginOptions.OptionFlags1 | fUseDB | fSetLang,
-		HostName:      p.Workstation,
-		ServerName:    serverName,
-		AppName:       p.AppName,
-		TypeFlags:     p.LoginOptions.TypeFlags | typeFlags,
-		CtlIntName:    "go-mssqldb",
-		ClientProgVer: getDriverVersion(driverVersion),
+		TDSVersion:     TDSVersion,
+		PacketSize:     packetSize,
+		Database:       p.Database,
+		OptionFlags2:   p.LoginOptions.OptionFlags2 | fODBC, // to get unlimited TEXTSIZE,
+		OptionFlags1:   p.LoginOptions.OptionFlags1 | fUseDB | fSetLang,
+		HostName:       p.Workstation,
+		ServerName:     serverName,
+		AppName:        p.AppName,
+		TypeFlags:      p.LoginOptions.TypeFlags | typeFlags,
+		CtlIntName:     "go-mssqldb",
+		ClientProgVer:  getDriverVersion(driverVersion),
+		ChangePassword: p.ChangePassword,
+	}
+	if p.ColumnEncryption {
+		_ = l.FeatureExt.Add(&featureExtColumnEncryption{})
 	}
 	switch {
 	case fe.FedAuthLibrary == FedAuthLibrarySecurityToken:
@@ -1058,14 +1122,14 @@ func prepareLogin(ctx context.Context, c *Connector, p msdsn.Config, logger Cont
 			return nil, err
 		}
 
-		l.FeatureExt.Add(fe)
+		_ = l.FeatureExt.Add(fe)
 
 	case fe.FedAuthLibrary == FedAuthLibraryADAL:
 		if uint64(p.LogFlags)&logDebug != 0 {
 			logger.Log(ctx, msdsn.LogDebug, "Starting federated authentication using ADAL")
 		}
 
-		l.FeatureExt.Add(fe)
+		_ = l.FeatureExt.Add(fe)
 
 	case auth != nil:
 		if uint64(p.LogFlags)&logDebug != 0 {
@@ -1089,8 +1153,29 @@ func prepareLogin(ctx context.Context, c *Connector, p msdsn.Config, logger Cont
 	return l, nil
 }
 
-func connect(ctx context.Context, c *Connector, logger ContextLogger, p msdsn.Config) (res *tdsSession, err error) {
+func getTLSConn(conn *timeoutConn, p msdsn.Config, alpnSeq string) (tlsConn *tls.Conn, err error) {
+	var config *tls.Config
+	if pc := p.TLSConfig; pc != nil {
+		config = pc
+	}
+	if config == nil {
+		config, err = msdsn.SetupTLS("", false, p.Host, "")
+		if err != nil {
+			return nil, err
+		}
+	}
+	//Set ALPN Sequence
+	config.NextProtos = []string{alpnSeq}
+	tlsConn = tls.Client(conn.c, config)
+	err = tlsConn.Handshake()
+	if err != nil {
+		return nil, fmt.Errorf("TLS Handshake failed: %w", err)
+	}
+	return tlsConn, nil
+}
 
+func connect(ctx context.Context, c *Connector, logger ContextLogger, p msdsn.Config) (res *tdsSession, err error) {
+	isTransportEncrypted := false
 	// if instance is specified use instance resolution service
 	if len(p.Instance) > 0 && p.Port != 0 && uint64(p.LogFlags)&logDebug != 0 {
 		// both instance name and port specified
@@ -1130,14 +1215,25 @@ initiate_connection:
 	}
 
 	toconn := newTimeoutConn(conn, p.ConnTimeout)
-
 	outbuf := newTdsBuffer(packetSize, toconn)
+
+	if p.Encryption == msdsn.EncryptionStrict {
+		outbuf.transport, err = getTLSConn(toconn, p, "tds/8.0")
+		if err != nil {
+			return nil, err
+		}
+		isTransportEncrypted = true
+	}
 	sess := tdsSession{
-		buf:      outbuf,
-		logger:   logger,
-		logFlags: uint64(p.LogFlags),
+		buf:        outbuf,
+		logger:     logger,
+		logFlags:   uint64(p.LogFlags),
+		aeSettings: &alwaysEncryptedSettings{keyProviders: aecmk.GetGlobalCekProviders()},
 	}
 
+	for i, p := range c.keyProviders {
+		sess.aeSettings.keyProviders[i] = p
+	}
 	fedAuth := &featureExtFedAuth{
 		FedAuthLibrary: FedAuthLibraryReserved,
 	}
@@ -1163,42 +1259,47 @@ initiate_connection:
 		return nil, err
 	}
 
-	if encrypt != encryptNotSup {
-		var config *tls.Config
-		if pc := p.TLSConfig; pc != nil {
-			config = pc
-			if config.DynamicRecordSizingDisabled == false {
-				config = config.Clone()
+	//We need not perform TLS handshake if the communication channel is already encrypted (encrypt=strict)
+	if !isTransportEncrypted {
+		if encrypt != encryptNotSup {
+			var config *tls.Config
+			if pc := p.TLSConfig; pc != nil {
+				config = pc
+				if !config.DynamicRecordSizingDisabled {
+					config = config.Clone()
 
-				// fix for https://github.com/microsoft/go-mssqldb/issues/166
-				// Go implementation of TLS payload size heuristic algorithm splits single TDS package to multiple TCP segments,
-				// while SQL Server seems to expect one TCP segment per encrypted TDS package.
-				// Setting DynamicRecordSizingDisabled to true disables that algorithm and uses 16384 bytes per TLS package
-				config.DynamicRecordSizingDisabled = true
+					// fix for https://github.com/microsoft/go-mssqldb/issues/166
+					// Go implementation of TLS payload size heuristic algorithm splits single TDS package to multiple TCP segments,
+					// while SQL Server seems to expect one TCP segment per encrypted TDS package.
+					// Setting DynamicRecordSizingDisabled to true disables that algorithm and uses 16384 bytes per TLS package
+					config.DynamicRecordSizingDisabled = true
+				}
 			}
-		}
-		if config == nil {
-			config, err = msdsn.SetupTLS("", false, p.Host, "")
+			if config == nil {
+				config, err = msdsn.SetupTLS("", false, p.Host, "")
+				if err != nil {
+					return nil, err
+				}
+
+			}
+
+			// setting up connection handler which will allow wrapping of TLS handshake packets inside TDS stream
+			handshakeConn := tlsHandshakeConn{buf: outbuf}
+			passthrough := passthroughConn{c: &handshakeConn}
+			tlsConn := tls.Client(&passthrough, config)
+			err = tlsConn.Handshake()
+			passthrough.c = toconn
+			outbuf.transport = tlsConn
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("TLS Handshake failed: %v", err)
+			}
+			if encrypt == encryptOff {
+				outbuf.afterFirst = func() {
+					outbuf.transport = toconn
+				}
 			}
 		}
 
-		// setting up connection handler which will allow wrapping of TLS handshake packets inside TDS stream
-		handshakeConn := tlsHandshakeConn{buf: outbuf}
-		passthrough := passthroughConn{c: &handshakeConn}
-		tlsConn := tls.Client(&passthrough, config)
-		err = tlsConn.Handshake()
-		passthrough.c = toconn
-		outbuf.transport = tlsConn
-		if err != nil {
-			return nil, fmt.Errorf("TLS Handshake failed: %v", err)
-		}
-		if encrypt == encryptOff {
-			outbuf.afterFirst = func() {
-				outbuf.transport = toconn
-			}
-		}
 	}
 
 	var auth integratedauth.IntegratedAuthenticator
@@ -1295,6 +1396,18 @@ initiate_connection:
 			case loginAckStruct:
 				sess.loginAck = token
 				loginAck = true
+			case featureExtAck:
+				for _, v := range token {
+					switch v := v.(type) {
+					case colAckStruct:
+						if v.Version <= 2 && v.Version > 0 {
+							sess.alwaysEncrypted = true
+							if len(v.EnclaveType) > 0 {
+								sess.aeSettings.enclaveType = string(v.EnclaveType)
+							}
+						}
+					}
+				}
 			case doneStruct:
 				if token.isError() {
 					tokenErr := token.getError()
@@ -1323,4 +1436,22 @@ initiate_connection:
 		goto initiate_connection
 	}
 	return &sess, nil
+}
+
+type featureExtColumnEncryption struct {
+}
+
+func (f *featureExtColumnEncryption) featureID() byte {
+	return featExtCOLUMNENCRYPTION
+}
+
+func (f *featureExtColumnEncryption) toBytes() []byte {
+	/*
+		1 = The client supports column encryption without enclave computations.
+		2 = The client SHOULD<25> support column encryption when encrypted data require enclave computations.
+		3 = The client SHOULD<26> support column encryption when encrypted data require enclave computations
+		with the additional ability to cache column encryption keys that are to be sent to the enclave
+		and the ability to retry queries when the keys sent by the client do not match what is needed for the query to run.
+	*/
+	return []byte{0x01}
 }
