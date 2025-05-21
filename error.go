@@ -1,7 +1,9 @@
 package mssql
 
 import (
+	"bytes"
 	"database/sql/driver"
+	"encoding/binary"
 	"fmt"
 )
 
@@ -21,6 +23,46 @@ type Error struct {
 	// All lists all errors that were received from first to last.
 	// This includes the last one, which is described in the other members.
 	All []Error
+}
+
+// Marshal marshals the error to the wire protocol token.
+func (e *Error) Marshal() ([]byte, error) {
+	buf := bytes.NewBuffer([]byte{
+		byte(tokenError),
+	})
+	length := 2 + // length
+		4 + // number
+		1 + // state
+		1 + // class
+		(2 + 2*len(e.Message)) + // message
+		(1 + 2*len(e.ServerName)) + // server name
+		(1 + 2*len(e.ProcName)) + // proc name
+		4 // line no
+	if err := binary.Write(buf, binary.LittleEndian, uint16(length)); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(buf, binary.LittleEndian, e.Number); err != nil {
+		return nil, err
+	}
+	if err := buf.WriteByte(e.State); err != nil {
+		return nil, err
+	}
+	if err := buf.WriteByte(e.Class); err != nil {
+		return nil, err
+	}
+	if err := writeUsVarChar(buf, e.Message); err != nil {
+		return nil, err
+	}
+	if err := writeBVarChar(buf, e.ServerName); err != nil {
+		return nil, err
+	}
+	if err := writeBVarChar(buf, e.ProcName); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(buf, binary.LittleEndian, e.LineNo); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 func (e Error) Error() string {
