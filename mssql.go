@@ -17,7 +17,9 @@ import (
 	"unicode"
 
 	"github.com/golang-sql/sqlexp"
+
 	"github.com/microsoft/go-mssqldb/aecmk"
+	"github.com/microsoft/go-mssqldb/integratedauth"
 	"github.com/microsoft/go-mssqldb/internal/querytext"
 	"github.com/microsoft/go-mssqldb/msdsn"
 )
@@ -139,6 +141,13 @@ func NewConnectorWithAccessTokenProvider(dsn string, tokenProvider func(ctx cont
 	)
 }
 
+// NewConnectorConfigCustomAuth is like NewConnectorConfig, but also injects custom auth implementation.
+func NewConnectorConfigCustomAuth(config msdsn.Config, auth integratedauth.IntegratedAuthenticator) *Connector {
+	conn := newConnector(config, driverInstanceNoProcess)
+	conn.auth = auth
+	return conn
+}
+
 // NewConnectorConfig creates a new Connector for a DSN Config struct.
 // The returned connector may be used with sql.OpenDB.
 func NewConnectorConfig(config msdsn.Config) *Connector {
@@ -171,6 +180,9 @@ type Connector struct {
 
 	// callback that can provide a security token during ADAL login
 	adalTokenProvider func(ctx context.Context, serverSPN, stsURL string) (string, error)
+
+	// auth allows to provide custom authenticator.
+	auth integratedauth.IntegratedAuthenticator
 
 	// SessionInitSQL is executed after marking a given session to be reset.
 	// When not present, the next query will still reset the session to the
@@ -248,6 +260,16 @@ type outputs struct {
 // IsValid satisfies the driver.Validator interface.
 func (c *Conn) IsValid() bool {
 	return c.connectionGood
+}
+
+// GetUnderlyingConn returns underlying raw server connection.
+func (c *Conn) GetUnderlyingConn() io.ReadWriteCloser {
+	return c.sess.buf.transport
+}
+
+// GetLoginFlags returns tokens returned by server during login handshake.
+func (c *Conn) GetLoginFlags() []Token {
+	return c.sess.loginFlags
 }
 
 // checkBadConn marks the connection as bad based on the characteristics
@@ -754,8 +776,8 @@ loop:
 				// This improves results in queries like that:
 				// set nocount on; select 1
 				// see TestIgnoreEmptyResults test
-				//case doneStruct:
-				//break loop
+				// case doneStruct:
+				// break loop
 				case []columnStruct:
 					cols = token
 					break loop
