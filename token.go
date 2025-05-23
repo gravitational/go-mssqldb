@@ -556,13 +556,6 @@ func parseFedAuthInfo(r *tdsBuffer) fedAuthInfoStruct {
 	}
 }
 
-// LoginAckToken returns a LoginAck token.
-func LoginAckToken() Token {
-	return loginAckStruct{
-		TDSVersion: verTDS74,
-	}
-}
-
 type loginAckStruct struct {
 	Interface  uint8
 	TDSVersion uint32
