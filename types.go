@@ -123,6 +123,10 @@ type xmlInfo struct {
 	XmlSchemaCollection string
 }
 
+func ReadTypeInfo(r *TDSBuffer, typeId byte, c *cryptoMetadata, encoding msdsn.EncodeParameters) typeInfo {
+	return readTypeInfo(r, typeId, c, encoding)
+}
+
 func readTypeInfo(r *tdsBuffer, typeId byte, c *cryptoMetadata, encoding msdsn.EncodeParameters) (res typeInfo) {
 	res.TypeId = typeId
 	switch typeId {
@@ -742,7 +746,11 @@ func readPLPType(ti *typeInfo, r *tdsBuffer, c *cryptoMetadata) interface{} {
 			// size unknown
 			buf = bytes.NewBuffer(make([]byte, 0, 1000))
 		default:
-			buf = bytes.NewBuffer(make([]byte, 0, size))
+			// PLP types can set their size to max unit64 (2^64) bytes causing a
+			// large allocation that can takes some time to complete or panic
+			// due to lack of memory. To avoid this we're using a fixed size buffer
+			// with same size as used on `io.Copy` internal buffer: https://github.com/golang/go/blob/release-branch.go1.20/src/io/io.go#L416
+			buf = bytes.NewBuffer(make([]byte, 0, 32*1024))
 		}
 		for {
 			chunksize := r.uint32()

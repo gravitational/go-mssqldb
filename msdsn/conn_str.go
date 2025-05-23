@@ -134,11 +134,13 @@ type Config struct {
 	Protocols []string
 	// ProtocolParameters are written by non-tcp ProtocolParser implementations
 	ProtocolParameters map[string]interface{}
+	// LoginOptions allows to pass option flags to the server during login.
+	LoginOptions LoginOptions
 	// BrowserMsg is the message identifier to fetch instance data from SQL browser
 	BrowserMessage BrowserMsg
 	// ChangePassword is used to set the login's password during login. Ignored for non-SQL authentication.
 	ChangePassword string
-	//ColumnEncryption is true if the application needs to decrypt or encrypt Always Encrypted values
+	// ColumnEncryption is true if the application needs to decrypt or encrypt Always Encrypted values
 	ColumnEncryption bool
 	// Attempt to connect to all IPs in parallel when MultiSubnetFailover is true
 	MultiSubnetFailover bool
@@ -149,6 +151,14 @@ type Config struct {
 	NoTraceID bool
 	// Parameters related to type encoding
 	Encoding EncodeParameters
+}
+
+// LoginOptions combines option flags and other login options.
+type LoginOptions struct {
+	OptionFlags1 uint8
+	OptionFlags2 uint8
+	TypeFlags    uint8
+	OptionFlags3 uint8
 }
 
 func readDERFile(filename string) ([]byte, error) {

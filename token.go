@@ -10,12 +10,13 @@ import (
 	"strconv"
 
 	"github.com/golang-sql/sqlexp"
+	"golang.org/x/text/encoding/unicode"
+
 	"github.com/microsoft/go-mssqldb/aecmk"
 	"github.com/microsoft/go-mssqldb/internal/github.com/swisscom/mssql-always-encrypted/pkg/algorithms"
 	"github.com/microsoft/go-mssqldb/internal/github.com/swisscom/mssql-always-encrypted/pkg/encryption"
 	"github.com/microsoft/go-mssqldb/internal/github.com/swisscom/mssql-always-encrypted/pkg/keys"
 	"github.com/microsoft/go-mssqldb/msdsn"
-	"golang.org/x/text/encoding/unicode"
 )
 
 //go:generate go run golang.org/x/tools/cmd/stringer -type token
@@ -112,8 +113,18 @@ const (
 // interface for all tokens
 type tokenStruct interface{}
 
+// Token represents a token that can be marshaled to wire representation.
+type Token interface {
+	Marshal() ([]byte, error)
+}
+
 type orderStruct struct {
 	ColIds []uint16
+}
+
+// DoneToken returns a Done token.
+func DoneToken() Token {
+	return doneStruct{}
 }
 
 type doneStruct struct {
@@ -121,6 +132,23 @@ type doneStruct struct {
 	CurCmd   uint16
 	RowCount uint64
 	errors   []Error
+}
+
+// Marshal returns the token's wire protocol representation.
+func (d doneStruct) Marshal() ([]byte, error) {
+	buf := bytes.NewBuffer([]byte{
+		byte(tokenDone),
+	})
+	if err := binary.Write(buf, binary.LittleEndian, d.Status); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(buf, binary.LittleEndian, d.CurCmd); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(buf, binary.LittleEndian, d.RowCount); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 func (d doneStruct) isError() bool {
@@ -141,17 +169,35 @@ func (d doneStruct) getError() Error {
 
 type doneInProcStruct doneStruct
 
+type envChangeStruct struct {
+	bytes []byte
+}
+
+// Marshal returns the token's wire protocol representation.
+func (e envChangeStruct) Marshal() ([]byte, error) {
+	return e.bytes, nil
+}
+
 // ENVCHANGE stream
 // http://msdn.microsoft.com/en-us/library/dd303449.aspx
-func processEnvChg(ctx context.Context, sess *tdsSession) {
+func processEnvChg(ctx context.Context, sess *tdsSession) envChangeStruct {
+	buf := bytes.NewBuffer([]byte{
+		byte(tokenEnvChange),
+	})
 	size := sess.buf.uint16()
-	r := &io.LimitedReader{R: sess.buf, N: int64(size)}
+	if err := binary.Write(buf, binary.LittleEndian, size); err != nil {
+		badStreamPanic(err)
+	}
+	// Duplicate the token stream in the buffer.
+	r := io.TeeReader(&io.LimitedReader{R: sess.buf, N: int64(size)}, buf)
 	for {
 		var err error
 		var envtype uint8
 		err = binary.Read(r, binary.LittleEndian, &envtype)
 		if err == io.EOF {
-			return
+			return envChangeStruct{
+				bytes: buf.Bytes(),
+			}
 		}
 		if err != nil {
 			badStreamPanic(err)
@@ -392,7 +438,9 @@ func processEnvChg(ctx context.Context, sess *tdsSession) {
 		default:
 			// ignore rest of records because we don't know how to skip those
 			sess.LogF(ctx, msdsn.LogDebug, "WARN: Unknown ENVCHANGE record detected with type id = %d", envtype)
-			return
+			return envChangeStruct{
+				bytes: buf.Bytes(),
+			}
 		}
 	}
 }
@@ -513,6 +561,39 @@ type loginAckStruct struct {
 	TDSVersion uint32
 	ProgName   string
 	ProgVer    uint32
+}
+
+// Marshal returns the token's wire protocol representation.
+func (l loginAckStruct) Marshal() ([]byte, error) {
+	buf := bytes.NewBuffer([]byte{
+		byte(tokenLoginAck),
+	})
+	size := uint16(1 + // interface: uint8
+		4 + // version: uint32
+		1 + // prog name len: uint8
+		len(l.ProgName)*2 + // UCS2 encoded prog name
+		4, // prog version: uint32
+	)
+	if err := binary.Write(buf, binary.LittleEndian, size); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(buf, binary.LittleEndian, l.Interface); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(buf, binary.BigEndian, l.TDSVersion); err != nil {
+		return nil, err
+	}
+	progName := str2ucs2(l.ProgName)
+	if err := binary.Write(buf, binary.LittleEndian, uint8(len(progName)/2)); err != nil {
+		return nil, err
+	}
+	if _, err := buf.Write(progName); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(buf, binary.BigEndian, l.ProgVer); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 func parseLoginAck(r *tdsBuffer) loginAckStruct {
@@ -1084,7 +1165,8 @@ func processSingleResponse(ctx context.Context, sess *tdsSession, ch chan tokenS
 			}
 			ch <- row
 		case tokenEnvChange:
-			processEnvChg(ctx, sess)
+			envChg := processEnvChg(ctx, sess)
+			ch <- envChg
 		case tokenError:
 			err := parseError72(sess.buf)
 			sess.LogF(ctx, msdsn.LogDebug, "got ERROR %d %s", err.Number, err.Message)

@@ -170,6 +170,7 @@ type tdsSession struct {
 	logger          ContextLogger
 	routedServer    string
 	routedPort      uint16
+	loginFlags      []Token
 	alwaysEncrypted bool
 	aeSettings      *alwaysEncryptedSettings
 	connid          UniqueIdentifier
@@ -227,11 +228,23 @@ type preloginOption struct {
 
 var preloginOptionSize = binary.Size(preloginOption{})
 
+// Writer is an interface that combines Writer and ByteWriter.
+type Writer interface {
+	io.Writer
+	io.ByteWriter
+}
+
 // http://msdn.microsoft.com/en-us/library/dd357559.aspx
 func writePrelogin(packetType packetType, w *tdsBuffer, fields map[uint8][]byte) error {
-	var err error
-
 	w.BeginPacket(packetType, false)
+	if err := WritePreLoginFields(w, fields); err != nil {
+		return err
+	}
+	return w.FinishPacket()
+}
+
+func WritePreLoginFields(w Writer, fields map[uint8][]byte) error {
+	var err error
 	offset := uint16(5*len(fields) + 1)
 	keys := make(keySlice, 0, len(fields))
 	for k := range fields {
@@ -271,7 +284,7 @@ func writePrelogin(packetType packetType, w *tdsBuffer, fields map[uint8][]byte)
 			return errors.New("Write method didn't write the whole value")
 		}
 	}
-	return w.FinishPacket()
+	return nil
 }
 
 func readPrelogin(r *tdsBuffer) (map[uint8][]byte, error) {
@@ -588,6 +601,11 @@ const (
 	mask32 uint32 = 0xFF80FF80
 	mask16 uint16 = 0xFF80
 )
+
+// ParseUCS2String returns string from its UCS-2 encoded representation.
+func ParseUCS2String(s []byte) (string, error) {
+	return ucs22str(s)
+}
 
 func manglePassword(password string) []byte {
 	var ucs2password []byte = str2ucs2(password)
@@ -1058,6 +1076,11 @@ func prepareLogin(ctx context.Context, c *Connector, p msdsn.Config, logger Cont
 		ChangePassword: p.ChangePassword,
 		ClientPID:      uint32(os.Getpid()),
 	}
+	l.OptionFlags1 |= p.LoginOptions.OptionFlags1
+	l.OptionFlags2 |= p.LoginOptions.OptionFlags2
+	// l.OptionFlags3 |= p.LoginOptions.OptionFlags3
+	l.TypeFlags |= p.LoginOptions.TypeFlags
+
 	getClientId(&l.ClientID)
 	if p.ColumnEncryption {
 		_ = l.FeatureExt.Add(&featureExtColumnEncryption{})
@@ -1118,7 +1141,7 @@ func getTLSConn(conn *timeoutConn, p msdsn.Config, alpnSeq string) (tlsConn *tls
 			return nil, err
 		}
 	}
-	//Set ALPN Sequence
+	// Set ALPN Sequence
 	config.NextProtos = []string{alpnSeq}
 	tlsConn = tls.Client(conn.c, config)
 	err = tlsConn.Handshake()
@@ -1208,7 +1231,7 @@ initiate_connection:
 		return nil, err
 	}
 
-	//We need not perform TLS handshake if the communication channel is already encrypted (encrypt=strict)
+	// We need not perform TLS handshake if the communication channel is already encrypted (encrypt=strict)
 	if !isTransportEncrypted {
 		if encrypt != encryptNotSup {
 			var config *tls.Config
@@ -1251,17 +1274,18 @@ initiate_connection:
 
 	}
 
-	auth, err := integratedauth.GetIntegratedAuthenticator(p)
-	if err != nil {
-		if uint64(p.LogFlags)&logDebug != 0 {
-			logger.Log(ctx, msdsn.LogDebug, fmt.Sprintf("Error while creating integrated authenticator: %v", err))
+	auth := c.auth
+	if auth == nil {
+		auth, err = integratedauth.GetIntegratedAuthenticator(p)
+		if err != nil {
+			if uint64(p.LogFlags)&logDebug != 0 {
+				logger.Log(ctx, msdsn.LogDebug, fmt.Sprintf("Error while creating integrated authenticator: %v", err))
+			}
+			return nil, err
 		}
-
-		return nil, err
-	}
-
-	if auth != nil {
-		defer auth.Free()
+		if auth != nil {
+			defer auth.Free()
+		}
 	}
 
 	login, err := prepareLogin(ctx, c, p, logger, auth, fedAuth, uint32(outbuf.PackageSize()))
@@ -1292,6 +1316,15 @@ initiate_connection:
 				break
 			}
 
+			// Save options returned by the server so callers implementing
+			// proxies can pass them back to the original client.
+			switch tok.(type) {
+			case envChangeStruct, loginAckStruct, doneStruct:
+				if token, ok := tok.(Token); ok {
+					sess.loginFlags = append(sess.loginFlags, token)
+				}
+			}
+
 			switch token := tok.(type) {
 			case sspiMsg:
 				sspi_msg, err := auth.NextBytes(token)
@@ -1312,8 +1345,8 @@ initiate_connection:
 				}
 			// TODO: for Live ID authentication it may be necessary to
 			// compare fedAuth.Nonce == token.Nonce and keep track of signature
-			//case fedAuthAckStruct:
-			//fedAuth.Signature = token.Signature
+			// case fedAuthAckStruct:
+			// fedAuth.Signature = token.Signature
 			case fedAuthInfoStruct:
 				// For ADAL workflows this contains the STS URL and server SPN.
 				// If received outside of an ADAL workflow, ignore.
